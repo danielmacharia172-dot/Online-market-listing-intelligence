@@ -1,1 +1,4 @@
-from app.main import *
+from app.main import main
+
+
+main()
