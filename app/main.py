@@ -30,18 +30,27 @@ if not st.session_state.authenticated:
         submitted = st.form_submit_button("Log in")
 
     if submitted:
-        if authenticate_user(username, password, expected_username, expected_password):
-            st.session_state.authenticated = True
-            emit_audit_event(logger, "login", {"status": "success", "user": username})
-            st.rerun()
-        emit_audit_event(logger, "login", {"status": "failed", "user": username})
-        st.error("Invalid username or password")
+        try:
+            if authenticate_user(username, password, expected_username, expected_password):
+                st.session_state.authenticated = True
+                emit_audit_event(logger, "login", {"status": "success", "user": username})
+                st.rerun()
+            emit_audit_event(logger, "login", {"status": "failed", "user": username})
+            st.error("Invalid username or password")
+        except Exception as exc:
+            logger.exception("Login flow failed")
+            st.error(f"Login failed unexpectedly: {exc}")
     st.stop()
 
-client_id = get_client_identity(getattr(st.context, "headers", {}))
-if not rate_limiter.allow_request(client_id):
-    emit_audit_event(logger, "rate_limited", {"client": client_id})
-    st.error("Too many requests from this client. Please wait a minute and try again.")
+try:
+    client_id = get_client_identity(getattr(st.context, "headers", {}))
+    if not rate_limiter.allow_request(client_id):
+        emit_audit_event(logger, "rate_limited", {"client": client_id})
+        st.error("Too many requests from this client. Please wait a minute and try again.")
+        st.stop()
+except Exception as exc:
+    logger.exception("Client identification failed")
+    st.error(f"Request setup failed unexpectedly: {exc}")
     st.stop()
 
 with st.form("listing_form"):
@@ -61,6 +70,11 @@ if submitted:
     except ValueError as exc:
         emit_audit_event(logger, "validation_failed", {"client": client_id, "error": str(exc)})
         st.error(f"Input validation failed: {exc}")
+        st.stop()
+    except Exception as exc:
+        logger.exception("Listing analysis failed")
+        emit_audit_event(logger, "analysis_failed", {"client": client_id, "error": str(exc)})
+        st.error(f"Analysis failed unexpectedly: {exc}")
         st.stop()
 
     emit_audit_event(logger, "listing_analyzed", {"client": client_id, "score": quality["score"]})
