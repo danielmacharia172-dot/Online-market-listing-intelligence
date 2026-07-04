@@ -8,7 +8,17 @@ from app.pipelines.fraud_detector import detect_fraud_signals
 from app.pipelines.listing_quality import analyze_listing_quality
 from app.pipelines.price_recommender import recommend_price
 from app.pipelines.trust_score import compute_trust_score
-from app.security import RateLimiter, authenticate_user, get_auth_credentials, get_client_identity, validate_listing_input
+from app.security import (
+    MAX_DESCRIPTION_LENGTH,
+    MAX_LOCATION_LENGTH,
+    MAX_PRICE,
+    MAX_TITLE_LENGTH,
+    RateLimiter,
+    authenticate_user,
+    get_auth_credentials,
+    get_client_identity,
+    validate_listing_input,
+)
 
 
 def analyze_uploaded_photo(uploaded_photo: Any) -> dict[str, Any]:
@@ -145,6 +155,64 @@ def render_reviews_section(logger: Any, client_id: str) -> None:
         st.write(item["review"])
 
 
+def build_listing_field_errors(title: str, description: str, price: Any, location: str) -> dict[str, str]:
+    errors: dict[str, str] = {}
+
+    if not isinstance(title, str) or not title.strip():
+        errors["title"] = "Listing title is required."
+    elif len(title.strip()) > MAX_TITLE_LENGTH:
+        errors["title"] = f"Listing title must be at most {MAX_TITLE_LENGTH} characters."
+
+    if not isinstance(description, str) or not description.strip():
+        errors["description"] = "Description is required."
+    elif len(description.strip()) > MAX_DESCRIPTION_LENGTH:
+        errors["description"] = f"Description must be at most {MAX_DESCRIPTION_LENGTH} characters."
+
+    if not isinstance(location, str) or not location.strip():
+        errors["location"] = "Location is required."
+    elif len(location.strip()) > MAX_LOCATION_LENGTH:
+        errors["location"] = f"Location must be at most {MAX_LOCATION_LENGTH} characters."
+
+    try:
+        numeric_price = float(price)
+        if numeric_price < 0:
+            errors["price"] = "Price cannot be negative."
+        elif numeric_price > MAX_PRICE:
+            errors["price"] = f"Price must be less than or equal to {MAX_PRICE}."
+    except (TypeError, ValueError):
+        errors["price"] = "Price must be numeric."
+
+    combined_text = f"{title}{description}{location}"
+    if any(ord(ch) < 32 and ch not in "\t\n\r" for ch in combined_text):
+        control_error = "Input contains unsupported control characters."
+        for field_name in ("title", "description", "location"):
+            errors.setdefault(field_name, control_error)
+
+    return errors
+
+
+def render_listing_field_highlights(errors: dict[str, str]) -> None:
+    if not errors:
+        return
+
+    selectors = {
+        "title": "input[aria-label='Listing title']",
+        "description": "textarea[aria-label='Description']",
+        "price": "input[aria-label='Price']",
+        "location": "input[aria-label='Location']",
+    }
+
+    css_rules = []
+    for field, selector in selectors.items():
+        if field in errors:
+            css_rules.append(
+                f"{selector} {{ border: 2px solid #ff4b4b !important; box-shadow: 0 0 0 1px rgba(255, 75, 75, 0.35) !important; }}"
+            )
+
+    if css_rules:
+        st.markdown(f"<style>{''.join(css_rules)}</style>", unsafe_allow_html=True)
+
+
 def main() -> None:
     st.set_page_config(page_title="Online market listing intelligence", page_icon="🛍️")
     st.title("Online market listing intelligence")
@@ -192,11 +260,29 @@ def main() -> None:
         st.error(f"Request setup failed unexpectedly: {exc}")
         st.stop()
 
+    if "listing_field_errors" not in st.session_state:
+        st.session_state.listing_field_errors = {}
+
+    listing_field_errors: dict[str, str] = st.session_state.listing_field_errors
+    render_listing_field_highlights(listing_field_errors)
+
     with st.form("listing_form"):
         title = st.text_input("Listing title", placeholder="Used iPhone 13 Pro Max")
+        if "title" in listing_field_errors:
+            st.error(listing_field_errors["title"])
+
         description = st.text_area("Description", placeholder="Describe the item clearly and include condition details.")
+        if "description" in listing_field_errors:
+            st.error(listing_field_errors["description"])
+
         price = st.number_input("Price", min_value=0, step=1, value=699)
+        if "price" in listing_field_errors:
+            st.error(listing_field_errors["price"])
+
         location = st.text_input("Location", placeholder="Austin, TX")
+        if "location" in listing_field_errors:
+            st.error(listing_field_errors["location"])
+
         uploaded_photos = st.file_uploader(
             "Listing photos (optional)",
             type=["png", "jpg", "jpeg", "webp"],
@@ -205,6 +291,21 @@ def main() -> None:
         submitted = st.form_submit_button("Analyze listing")
 
     if submitted:
+        st.session_state.listing_field_errors = build_listing_field_errors(title, description, price, location)
+        listing_field_errors = st.session_state.listing_field_errors
+
+        if listing_field_errors:
+            emit_audit_event(
+                logger,
+                "validation_failed",
+                {
+                    "client": client_id,
+                    "field_errors": listing_field_errors,
+                },
+            )
+            st.warning("Please fix the highlighted fields and submit again.")
+            st.rerun()
+
         try:
             title, description, price, location = validate_listing_input(title=title, description=description, price=price, location=location)
             quality = analyze_listing_quality(title=title, description=description, price=price, location=location)
@@ -212,6 +313,7 @@ def main() -> None:
             price_recommendation = recommend_price(title=title, description=description, price=price, location=location)
             trust = compute_trust_score(title=title, description=description, price=price, location=location)
             photo_insights = [analyze_uploaded_photo(photo) for photo in (uploaded_photos or [])]
+            st.session_state.listing_field_errors = {}
         except ValueError as exc:
             emit_audit_event(logger, "validation_failed", {"client": client_id, "error": str(exc)})
             st.error(f"Input validation failed: {exc}")
