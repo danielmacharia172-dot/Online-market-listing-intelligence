@@ -103,3 +103,10 @@ def test_audit_logging_writes_structured_event(tmp_path, monkeypatch):
     contents = audit_path.read_text(encoding="utf-8")
     assert "login" in contents
     assert "success" in contents
+
+
+def test_audit_logging_does_not_raise_for_invalid_path(monkeypatch):
+    monkeypatch.setenv("APP_AUDIT_LOG_PATH", r"Z:\definitely-missing\audit.log")
+
+    logger = configure_logging("INFO")
+    emit_audit_event(logger, "login", {"status": "success", "user": "admin"})
