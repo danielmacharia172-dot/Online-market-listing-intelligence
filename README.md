@@ -6,8 +6,9 @@ This project provides a Streamlit-based experience for evaluating marketplace li
 - Fraud signal detection
 - Price recommendation
 - Trust score computation
-- Optional listing photo upload with basic image insights
-- Built-in buyer review platform with 1-5 star ratings
+- Multi-photo listing upload with image gallery + basic image insights
+- Built-in buyer review platform with per-listing 1-5 star ratings
+- Review sorting and minimum-rating filtering controls
 
 ## Run locally
 
