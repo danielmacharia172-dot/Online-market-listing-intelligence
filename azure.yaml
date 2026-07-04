@@ -1,4 +1,4 @@
-name: offerup-ai-listing-intelligence
+name: online-market-listing-intelligence
 services:
   web:
     project: .

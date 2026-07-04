@@ -1,7 +1,7 @@
 $resourceGroup = "offerup-rg"
 $location = "eastus"
 $planName = "offerup-plan"
-$appName = "offerup-ai-listing-intelligence"
+$appName = "online-market-listing-intelligence"
 
 az login
 az group create --name $resourceGroup --location $location

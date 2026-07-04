@@ -1,4 +1,4 @@
-# OfferUp AI Listing Intelligence
+# Online market listing intelligence
 
 This project provides a Streamlit-based experience for evaluating marketplace listings with four lightweight intelligence modules:
 
@@ -41,8 +41,8 @@ A sample file is available at [.env.example](.env.example).
 You can run the app in a container with:
 
 ```bash
-docker build -t offerup-ai-listing-intelligence .
-docker run --rm -p 8501:8501 --env-file .env.example offerup-ai-listing-intelligence
+docker build -t online-market-listing-intelligence .
+docker run --rm -p 8501:8501 --env-file .env.example online-market-listing-intelligence
 ```
 
 The repository also includes a Streamlit configuration file at [streamlit_config.toml](streamlit_config.toml) and a Docker build definition at [Dockerfile](Dockerfile).

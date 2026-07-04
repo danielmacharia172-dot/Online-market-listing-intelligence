@@ -146,8 +146,8 @@ def render_reviews_section(logger: Any, client_id: str) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="OfferUp AI Listing Intelligence", page_icon="🛍️")
-    st.title("OfferUp AI Listing Intelligence")
+    st.set_page_config(page_title="Online market listing intelligence", page_icon="🛍️")
+    st.title("Online market listing intelligence")
     st.caption("Improve listing quality, detect fraud, recommend prices, and compute a trust score.")
 
     logger = configure_logging()

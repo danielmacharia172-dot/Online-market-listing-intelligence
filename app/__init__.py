@@ -1,1 +1,1 @@
-"""OfferUp AI Listing Intelligence package."""
+"""Online market listing intelligence package."""
