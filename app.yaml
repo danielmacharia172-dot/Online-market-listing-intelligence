@@ -1,0 +1,6 @@
+runtime: python311
+entrypoint: bash startup.sh
+env_variables:
+  APP_USERNAME: admin
+  APP_PASSWORD: change-me
+  APP_AUDIT_LOG_PATH: /tmp/app_audit.log

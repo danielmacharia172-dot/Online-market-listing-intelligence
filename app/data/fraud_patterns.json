@@ -1,0 +1,17 @@
+[
+  {
+    "pattern": "Urgency and pressure",
+    "description": "Listings using urgent language to push buyers to act quickly without verification.",
+    "keywords": ["urgent", "hurry", "act fast", "cash only"]
+  },
+  {
+    "pattern": "External payment instructions",
+    "description": "Requests to bypass the platform and use direct payment or external links.",
+    "keywords": ["wire", "zelle", "cash app", "payment", "verify"]
+  },
+  {
+    "pattern": "Low-value bait listing",
+    "description": "Unusually cheap items that appear too good to be true.",
+    "keywords": ["too good", "cheap", "deal", "bargain"]
+  }
+]

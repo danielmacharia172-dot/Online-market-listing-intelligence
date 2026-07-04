@@ -1,0 +1,8 @@
+[server]
+headless = true
+enableCORS = true
+enableXsrfProtection = true
+port = 8501
+
+[logger]
+level = "info"

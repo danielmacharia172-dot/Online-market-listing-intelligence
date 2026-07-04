@@ -1,0 +1,6 @@
+name: offerup-ai-listing-intelligence
+services:
+  web:
+    project: .
+    language: python
+    host: appservice

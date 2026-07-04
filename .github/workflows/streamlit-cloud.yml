@@ -1,0 +1,16 @@
+name: Streamlit Cloud Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trigger Streamlit Cloud deploy
+        run: |
+          echo "Streamlit Cloud deployment is triggered by pushing to the connected repository."
+          echo "Set the environment variables in your Streamlit Cloud app settings: APP_USERNAME, APP_PASSWORD, APP_AUDIT_LOG_PATH"
