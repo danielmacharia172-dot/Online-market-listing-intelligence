@@ -162,7 +162,27 @@ def send_code_email(destination: str, code: str, purpose: str, username: str) ->
             )
             if 200 <= response.status_code < 300:
                 return True, "Verification code sent by email."
-            return False, "Email delivery failed through SendGrid API response."
+            details = ""
+            try:
+                payload = response.json()
+                errors = payload.get("errors", []) if isinstance(payload, dict) else []
+                if errors and isinstance(errors, list):
+                    first = errors[0] if isinstance(errors[0], dict) else {}
+                    message = str(first.get("message", "")).strip()
+                    field = str(first.get("field", "")).strip()
+                    if message:
+                        details = message
+                    if field:
+                        details = f"{details} (field: {field})" if details else f"field: {field}"
+            except Exception:
+                details = ""
+
+            if not details and response.text:
+                details = response.text[:220]
+
+            if details:
+                return False, f"SendGrid error {response.status_code}: {details}"
+            return False, f"SendGrid error {response.status_code}: email request rejected."
         except Exception:
             return False, "Email delivery failed through SendGrid runtime error."
 
