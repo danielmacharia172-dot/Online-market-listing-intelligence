@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -53,6 +54,8 @@ def get_first_secret_value(names: list[str]) -> str:
 APP_VERSION = "2026.07.07"
 PLATFORM_FEE_RATE = 0.08
 AUTH_STORE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "auth_store.json")
+MARKETPLACE_STORE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "marketplace_store.json")
+PASSWORD_HASH_ITERATIONS = 210000
 
 
 def now_utc_iso() -> str:
@@ -68,6 +71,26 @@ def load_auth_store() -> dict[str, Any]:
     except Exception:
         pass
     return {"accounts": {}, "account_profiles": {}, "user_roles": {}, "password_overrides": {}}
+
+
+def load_marketplace_store() -> dict[str, Any]:
+    try:
+        if os.path.exists(MARKETPLACE_STORE_PATH):
+            with open(MARKETPLACE_STORE_PATH, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+                return payload if isinstance(payload, dict) else {}
+    except Exception:
+        pass
+    return {
+        "analyzed_listings": {},
+        "buyer_reviews_by_listing": {},
+        "messages": [],
+        "transactions": [],
+        "listing_drafts": {},
+        "account_programs": {},
+        "last_listing_key": None,
+        "detected_location": "",
+    }
 
 
 def save_auth_store(username: str | None = None) -> None:
@@ -110,6 +133,78 @@ def save_auth_store(username: str | None = None) -> None:
         os.replace(temp_path, AUTH_STORE_PATH)
     except Exception:
         pass
+
+
+def save_marketplace_store(*sections: str) -> None:
+    store = load_marketplace_store()
+    requested_sections = set(sections) if sections else {
+        "analyzed_listings",
+        "buyer_reviews_by_listing",
+        "messages",
+        "transactions",
+        "listing_drafts",
+        "account_programs",
+        "last_listing_key",
+        "detected_location",
+    }
+
+    if "analyzed_listings" in requested_sections:
+        store["analyzed_listings"] = st.session_state.analyzed_listings
+    if "buyer_reviews_by_listing" in requested_sections:
+        store["buyer_reviews_by_listing"] = st.session_state.buyer_reviews_by_listing
+    if "messages" in requested_sections:
+        store["messages"] = st.session_state.messages
+    if "transactions" in requested_sections:
+        store["transactions"] = st.session_state.transactions
+    if "listing_drafts" in requested_sections:
+        store["listing_drafts"] = st.session_state.listing_drafts
+    if "account_programs" in requested_sections:
+        store["account_programs"] = st.session_state.account_programs
+    if "last_listing_key" in requested_sections:
+        store["last_listing_key"] = st.session_state.last_listing_key
+    if "detected_location" in requested_sections:
+        store["detected_location"] = st.session_state.detected_location
+
+    try:
+        os.makedirs(os.path.dirname(MARKETPLACE_STORE_PATH), exist_ok=True)
+        temp_path = f"{MARKETPLACE_STORE_PATH}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(store, handle, indent=2, sort_keys=True)
+        os.replace(temp_path, MARKETPLACE_STORE_PATH)
+    except Exception:
+        pass
+
+
+def reload_marketplace_store_into_session() -> None:
+    persisted = load_marketplace_store()
+    st.session_state.analyzed_listings = dict(persisted.get("analyzed_listings", {}))
+    st.session_state.buyer_reviews_by_listing = dict(persisted.get("buyer_reviews_by_listing", {}))
+    st.session_state.messages = list(persisted.get("messages", []))
+    st.session_state.transactions = list(persisted.get("transactions", []))
+    st.session_state.listing_drafts = dict(persisted.get("listing_drafts", {}))
+    st.session_state.account_programs = dict(persisted.get("account_programs", {}))
+    st.session_state.last_listing_key = persisted.get("last_listing_key")
+    st.session_state.detected_location = str(persisted.get("detected_location", ""))
+
+
+def get_marketplace_store_diagnostics() -> dict[str, Any]:
+    persisted = load_marketplace_store()
+    try:
+        file_exists = os.path.exists(MARKETPLACE_STORE_PATH)
+        last_modified = datetime.fromtimestamp(os.path.getmtime(MARKETPLACE_STORE_PATH), timezone.utc).isoformat() if file_exists else ""
+    except Exception:
+        file_exists = False
+        last_modified = ""
+
+    return {
+        "file_exists": file_exists,
+        "path": MARKETPLACE_STORE_PATH,
+        "last_modified": last_modified,
+        "listings_count": len(persisted.get("analyzed_listings", {})) if isinstance(persisted.get("analyzed_listings", {}), dict) else 0,
+        "messages_count": len(persisted.get("messages", [])) if isinstance(persisted.get("messages", []), list) else 0,
+        "transactions_count": len(persisted.get("transactions", [])) if isinstance(persisted.get("transactions", []), list) else 0,
+        "reviews_count": len(persisted.get("buyer_reviews_by_listing", {})) if isinstance(persisted.get("buyer_reviews_by_listing", {}), dict) else 0,
+    }
 
 
 def reload_auth_store_into_session() -> None:
@@ -343,12 +438,39 @@ def refresh_program_badges_and_growth(username: str) -> None:
 
 
 def hash_password(password: str) -> str:
-    salt = get_secret_value("APP_AUTH_SALT") or "local-dev-salt"
-    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+    salt = secrets.token_hex(16)
+    derived_key = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    )
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt}${derived_key.hex()}"
 
 
 def verify_password(password: str, expected_hash: str) -> bool:
-    return bool(password) and hash_password(password) == expected_hash
+    if not password or not expected_hash:
+        return False
+
+    parts = expected_hash.split("$")
+    if len(parts) == 4 and parts[0] == "pbkdf2_sha256":
+        try:
+            iterations = int(parts[1])
+        except ValueError:
+            return False
+        salt = parts[2]
+        expected_key = parts[3]
+        derived_key = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            iterations,
+        ).hex()
+        return hmac.compare_digest(derived_key, expected_key)
+
+    legacy_salt = get_secret_value("APP_AUTH_SALT") or "local-dev-salt"
+    legacy_hash = hashlib.sha256(f"{legacy_salt}:{password}".encode("utf-8")).hexdigest()
+    return hmac.compare_digest(legacy_hash, expected_hash)
 
 
 def is_contact_verified(account: dict[str, Any]) -> bool:
@@ -589,8 +711,13 @@ def authenticate_account(username: str, password: str) -> bool:
     if not account:
         return False
 
-    if not verify_password(password, str(account.get("password_hash", ""))):
+    current_hash = str(account.get("password_hash", ""))
+    if not verify_password(password, current_hash):
         return False
+
+    if current_hash and not current_hash.startswith("pbkdf2_sha256$"):
+        st.session_state.accounts[username]["password_hash"] = hash_password(password)
+        save_auth_store(username)
 
     return True
 
@@ -608,10 +735,9 @@ def create_account(username: str, password: str, email: str, phone: str) -> None
     save_auth_store(username)
 
 
-def save_remembered_credentials(client_id: str, username: str, password: str) -> None:
+def save_remembered_credentials(client_id: str, username: str) -> None:
     st.session_state.remembered_credentials_by_client[client_id] = {
         "username": username,
-        "password": password,
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -625,7 +751,7 @@ def get_remembered_credentials(client_id: str) -> dict[str, str]:
     remembered = st.session_state.remembered_credentials_by_client.get(client_id, {})
     return {
         "username": str(remembered.get("username", "")),
-        "password": str(remembered.get("password", "")),
+        "password": "",
     }
 
 
@@ -669,6 +795,7 @@ def check_for_available_update() -> dict[str, Any]:
 
 def init_state() -> None:
     persisted = load_auth_store()
+    marketplace = load_marketplace_store()
     defaults = {
         "authenticated": False,
         "current_user": "",
@@ -680,6 +807,8 @@ def init_state() -> None:
         "auth_page": "Login",
         "just_created_username": "",
         "just_created_password": "",
+        "pending_password_reset_username": "",
+        "pending_password_reset_method": "",
         "accounts": persisted.get("accounts", {}),
         "pending_verifications": {},
         "remembered_credentials_by_client": {},
@@ -692,18 +821,18 @@ def init_state() -> None:
             "update_needed": False,
         },
         "listing_field_errors": {},
-        "buyer_reviews_by_listing": {},
-        "analyzed_listings": {},
-        "last_listing_key": None,
+        "buyer_reviews_by_listing": marketplace.get("buyer_reviews_by_listing", {}),
+        "analyzed_listings": marketplace.get("analyzed_listings", {}),
+        "last_listing_key": marketplace.get("last_listing_key", None),
         "account_profiles": persisted.get("account_profiles", {}),
         "password_overrides": persisted.get("password_overrides", {}),
         "user_roles": persisted.get("user_roles", {}),
-        "messages": [],
-        "account_programs": {},
-        "transactions": [],
-        "detected_location": "",
+        "messages": marketplace.get("messages", []),
+        "account_programs": marketplace.get("account_programs", {}),
+        "transactions": marketplace.get("transactions", []),
+        "detected_location": marketplace.get("detected_location", ""),
         "location_confirmed_by_user": False,
-        "listing_drafts": {},
+        "listing_drafts": marketplace.get("listing_drafts", {}),
         "active_listing_draft": {
             "title": "",
             "description": "",
@@ -726,6 +855,22 @@ def init_state() -> None:
         st.session_state.password_overrides.update(persisted.get("password_overrides", {}))
     if persisted.get("user_roles"):
         st.session_state.user_roles.update(persisted.get("user_roles", {}))
+    if marketplace.get("analyzed_listings"):
+        st.session_state.analyzed_listings.update(marketplace.get("analyzed_listings", {}))
+    if marketplace.get("buyer_reviews_by_listing"):
+        st.session_state.buyer_reviews_by_listing.update(marketplace.get("buyer_reviews_by_listing", {}))
+    if marketplace.get("messages"):
+        st.session_state.messages = list(marketplace.get("messages", []))
+    if marketplace.get("transactions"):
+        st.session_state.transactions = list(marketplace.get("transactions", []))
+    if marketplace.get("listing_drafts"):
+        st.session_state.listing_drafts.update(marketplace.get("listing_drafts", {}))
+    if marketplace.get("account_programs"):
+        st.session_state.account_programs.update(marketplace.get("account_programs", {}))
+    if marketplace.get("detected_location"):
+        st.session_state.detected_location = str(marketplace.get("detected_location", ""))
+    if marketplace.get("last_listing_key"):
+        st.session_state.last_listing_key = marketplace.get("last_listing_key")
 
 
 def get_default_listing_draft(location_hint: str = "") -> dict[str, Any]:
@@ -766,11 +911,13 @@ def save_listing_draft_for_user(username: str, draft: dict[str, Any]) -> None:
         "photo_views": dict(draft.get("photo_views", {})),
         "uploaded_photos": list(draft.get("uploaded_photos", [])),
     }
+    save_marketplace_store("listing_drafts")
 
 
 def clear_listing_draft_for_user(username: str, location_hint: str = "") -> None:
     st.session_state.listing_drafts[username] = get_default_listing_draft(location_hint)
     st.session_state.active_listing_draft = get_default_listing_draft(location_hint)
+    save_marketplace_store("listing_drafts")
 
 
 def analyze_uploaded_photo(uploaded_photo: Any, view_label: str) -> dict[str, Any]:
@@ -1223,6 +1370,7 @@ def render_reviews_section(logger: Any, client_id: str) -> None:
             }
             bucket = reviews_by_listing.setdefault(selected_listing_key, [])
             bucket.insert(0, review_record)
+            save_marketplace_store("buyer_reviews_by_listing")
             emit_audit_event(
                 logger,
                 "review_posted",
@@ -1380,6 +1528,7 @@ def render_profile_panel(logger: Any) -> None:
                             "roi_proxy": None,
                         }
                     )
+                    save_marketplace_store("transactions")
                     st.success("Outcome record created.")
                 else:
                     st.error("Select a listing and provide a counterparty username.")
@@ -1408,6 +1557,7 @@ def render_profile_panel(logger: Any) -> None:
                     if new_status == "completed":
                         selected_tx["completed_at"] = now_utc_iso()
                     refresh_program_badges_and_growth(st.session_state.current_user)
+                    save_marketplace_store("transactions")
                     emit_audit_event(logger, "transaction_outcome_saved", {"user": st.session_state.current_user, "transaction_id": selected_tx_id})
                     st.success("Transaction outcome saved.")
 
@@ -1652,12 +1802,12 @@ def main() -> None:
 
         if active_auth_page == "Login":
             login_prefill = st.session_state.just_created_username or remembered["username"]
-            password_prefill = st.session_state.just_created_password or remembered["password"]
+            password_prefill = st.session_state.just_created_password or ""
             with st.form("login_form"):
                 username = st.text_input("Username", value=login_prefill)
                 password = st.text_input("Password", type="password", value=password_prefill)
                 remember_credentials = st.checkbox(
-                    "Remember username and password on this device",
+                    "Remember username on this device",
                     value=bool(remembered["username"]),
                 )
                 submitted = st.form_submit_button("Log in")
@@ -1677,7 +1827,7 @@ def main() -> None:
                         load_user_listing_draft(username.strip())
 
                         if remember_credentials:
-                            save_remembered_credentials(pre_auth_client_id, username.strip(), password)
+                            save_remembered_credentials(pre_auth_client_id, username.strip())
                         else:
                             clear_remembered_credentials(pre_auth_client_id)
 
@@ -1728,8 +1878,6 @@ def main() -> None:
                 recover_username = st.text_input("Username for recovery")
                 recovery_method = st.selectbox("Recovery method", ["Email", "Phone"])
                 recovery_value = st.text_input("Recovery email or phone")
-                recovery_new_password = st.text_input("New password", type="password")
-                recovery_confirm_password = st.text_input("Confirm new password", type="password")
                 recover_submit = st.form_submit_button("Send recovery verification code")
 
             if recover_submit:
@@ -1744,18 +1892,15 @@ def main() -> None:
                     st.error("No recovery contact is linked for this method.")
                 elif recovery_value.strip().lower() != expected_value.strip().lower():
                     st.error("Recovery verification failed. Contact value does not match.")
-                elif len(recovery_new_password.strip()) < 8:
-                    st.error("New password must be at least 8 characters.")
-                elif recovery_new_password != recovery_confirm_password:
-                    st.error("New password and confirmation do not match.")
                 else:
                     rec = issue_verification_code(
                         recover_username.strip(),
                         "reset_password",
                         recovery_method.lower(),
                         recovery_value.strip(),
-                        new_password_hash=hash_password(recovery_new_password.strip()),
                     )
+                    st.session_state.pending_password_reset_username = recover_username.strip()
+                    st.session_state.pending_password_reset_method = recovery_method.lower()
                     emit_audit_event(
                         logger,
                         "password_reset_requested",
@@ -1782,7 +1927,6 @@ def main() -> None:
 
             if verify_reset_submit:
                 pending = get_verification_record(verify_reset_username.strip(), "reset_password", verify_reset_method.lower())
-                account = st.session_state.accounts.get(verify_reset_username.strip())
 
                 if not pending:
                     st.error("No password reset is pending for this username.")
@@ -1790,13 +1934,37 @@ def main() -> None:
                     st.error("Recovery code expired. Request a new one.")
                 elif str(verify_reset_code).strip() != str(pending.get("code", "")):
                     st.error("Invalid recovery code.")
-                elif not account:
-                    st.error("Account not found.")
                 else:
-                    account["password_hash"] = str(pending.get("new_password_hash", account.get("password_hash", "")))
+                    st.session_state.pending_password_reset_username = verify_reset_username.strip()
+                    st.session_state.pending_password_reset_method = verify_reset_method.lower()
                     remove_verification_record(verify_reset_username.strip(), "reset_password", verify_reset_method.lower())
                     emit_audit_event(logger, "password_reset", {"user": verify_reset_username.strip()})
-                    st.success("Password reset successful. Use your new password to log in.")
+                    st.success("Code verified. Set a new password below.")
+
+            pending_reset_username = str(st.session_state.pending_password_reset_username).strip()
+            pending_reset_method = str(st.session_state.pending_password_reset_method).strip()
+            if pending_reset_username and pending_reset_method:
+                st.markdown("#### Set a new password")
+                with st.form("forgot_password_set_new_password_form"):
+                    new_reset_password = st.text_input("New password", type="password")
+                    confirm_reset_password = st.text_input("Confirm new password", type="password")
+                    set_new_password = st.form_submit_button("Update password")
+
+                if set_new_password:
+                    account = st.session_state.accounts.get(pending_reset_username)
+                    if not account:
+                        st.error("Account not found.")
+                    elif len(new_reset_password.strip()) < 8:
+                        st.error("New password must be at least 8 characters.")
+                    elif new_reset_password != confirm_reset_password:
+                        st.error("New password and confirmation do not match.")
+                    else:
+                        account["password_hash"] = hash_password(new_reset_password.strip())
+                        save_auth_store(pending_reset_username)
+                        st.session_state.pending_password_reset_username = ""
+                        st.session_state.pending_password_reset_method = ""
+                        emit_audit_event(logger, "password_reset_finalized", {"user": pending_reset_username, "method": pending_reset_method})
+                        st.success("Password reset successful. You can now log in with the new password.")
 
             resend_reset_user = st.text_input("Resend recovery code username", key="resend_reset_username")
             resend_reset_method = st.selectbox("Resend recovery method", ["Email", "Phone"], key="resend_reset_method")
@@ -1820,7 +1988,6 @@ def main() -> None:
                             "reset_password",
                             resend_reset_method.lower(),
                             destination,
-                            new_password_hash=str(existing.get("new_password_hash", "")),
                         )
                         delivered, note = deliver_verification_code(
                             resend_reset_method.lower(),
@@ -1893,6 +2060,8 @@ def main() -> None:
                 buyer_program["intent"]["deadline"] = deadline.strip()
                 buyer_program["intent"]["budget"] = budget
                 buyer_program["intent"]["onboarded"] = bool(goal.strip())
+                st.session_state.account_programs[st.session_state.current_user] = buyer_program
+                save_marketplace_store("account_programs")
                 st.success("Intent profile saved.")
 
         if not listings:
@@ -1936,6 +2105,7 @@ def main() -> None:
                                     "contact_preference": contact_preference,
                                 }
                             )
+                            save_marketplace_store("messages")
                             emit_audit_event(
                                 logger,
                                 "buyer_interest_sent",
@@ -2166,6 +2336,7 @@ def main() -> None:
             "ai": ai_suggestion,
         }
         st.session_state.last_listing_key = current_listing_key
+        save_marketplace_store("analyzed_listings", "last_listing_key")
 
         st.subheader("Results")
 

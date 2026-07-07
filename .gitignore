@@ -16,3 +16,4 @@ htmlcov/
 .streamlit/secrets.toml
 oracleJdk-26/
 app_audit.log
+app/data/*.json
