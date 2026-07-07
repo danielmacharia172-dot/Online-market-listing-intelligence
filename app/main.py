@@ -1,3 +1,6 @@
+import base64
+import json
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +25,18 @@ from app.security import (
     get_client_identity,
     validate_listing_input,
 )
+
+
+def get_secret_value(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+
+    try:
+        secret_value = str(st.secrets.get(name, "")).strip()
+        return secret_value
+    except Exception:
+        return ""
 
 
 def init_state() -> None:
@@ -175,7 +190,167 @@ def generate_ai_suggestion(
         "market_high": market_high,
         "suggested_price": blended_suggested,
         "generated_description": "\n".join(description_lines),
+        "confidence": "medium",
+        "source": "heuristic",
+        "model": "local-rules",
+        "issues_to_edit": [],
     }
+
+
+def image_to_data_url(uploaded_photo: Any) -> str:
+    raw_bytes = uploaded_photo.getvalue()
+    mime_map = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+    }
+    file_name = str(getattr(uploaded_photo, "name", "")).lower()
+    ext = file_name.split(".")[-1] if "." in file_name else "jpg"
+    mime_type = mime_map.get(ext, "image/jpeg")
+    encoded = base64.b64encode(raw_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def parse_json_object(text: str) -> dict[str, Any] | None:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        return None
+
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def sanitize_ai_vision_output(parsed: dict[str, Any], heuristic_fallback: dict[str, Any]) -> dict[str, Any]:
+    def as_int(value: Any, default: int) -> int:
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return default
+
+    product_name = str(parsed.get("product_name", heuristic_fallback["product_name"]))
+    year = str(parsed.get("year", heuristic_fallback["year"]))
+    condition = str(parsed.get("condition", heuristic_fallback["condition"]))
+    market_low = as_int(parsed.get("market_low"), heuristic_fallback["market_low"])
+    market_high = as_int(parsed.get("market_high"), heuristic_fallback["market_high"])
+    suggested_price = as_int(parsed.get("suggested_price"), heuristic_fallback["suggested_price"])
+    generated_description = str(parsed.get("generated_description", heuristic_fallback["generated_description"]))
+    confidence = str(parsed.get("confidence", "medium"))
+
+    issues_raw = parsed.get("issues_to_edit", [])
+    if isinstance(issues_raw, list):
+        issues_to_edit = [str(item) for item in issues_raw][:10]
+    else:
+        issues_to_edit = []
+
+    if market_low > market_high:
+        market_low, market_high = market_high, market_low
+
+    return {
+        "product_name": product_name,
+        "year": year,
+        "condition": condition,
+        "market_low": max(1, market_low),
+        "market_high": max(1, market_high),
+        "suggested_price": max(1, suggested_price),
+        "generated_description": generated_description,
+        "confidence": confidence,
+        "source": "vision-model",
+        "model": parsed.get("model", "openai-compatible-vision"),
+        "issues_to_edit": issues_to_edit,
+    }
+
+
+def generate_ai_suggestion_with_optional_vision(
+    title: str,
+    description: str,
+    location: str,
+    current_price: float,
+    photo_insights: list[dict[str, Any]],
+    pipeline_price: int,
+    uploaded_photos: list[Any],
+    photo_views: list[str],
+) -> dict[str, Any]:
+    heuristic = generate_ai_suggestion(
+        title=title,
+        description=description,
+        location=location,
+        current_price=current_price,
+        photo_insights=photo_insights,
+        pipeline_price=pipeline_price,
+    )
+
+    api_key = get_secret_value("OPENAI_API_KEY")
+    if not api_key or not uploaded_photos:
+        return heuristic
+
+    model = get_secret_value("OPENAI_MODEL") or "gpt-4o-mini"
+    base_url = get_secret_value("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+
+    try:
+        image_blocks = []
+        max_images = min(len(uploaded_photos), 6)
+        for idx in range(max_images):
+            image_blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_to_data_url(uploaded_photos[idx])},
+                }
+            )
+
+        views_text = ", ".join(photo_views[:max_images]) if photo_views else "unspecified"
+        prompt = (
+            "You are a product listing analyst. Analyze the provided product photos and listing context. "
+            "Return JSON only with keys: product_name, year, condition, market_low, market_high, "
+            "suggested_price, generated_description, confidence, issues_to_edit, model. "
+            "Condition must be one of: Excellent, Good, Fair, Poor, Unknown. "
+            "generated_description must be practical and specific for resale marketplaces. "
+            "issues_to_edit should be an array of concise fixes for the lister. "
+            f"Context: title={title}; description={description}; location={location}; current_price={current_price}; "
+            f"photo_views={views_text}."
+        )
+
+        payload = {
+            "model": model,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}] + image_blocks,
+                }
+            ],
+        }
+
+        response = requests.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=35,
+        )
+        if response.status_code >= 400:
+            return heuristic
+
+        body = response.json()
+        text_content = str(body["choices"][0]["message"]["content"])
+        parsed = parse_json_object(text_content)
+        if not parsed:
+            return heuristic
+
+        parsed.setdefault("model", model)
+        return sanitize_ai_vision_output(parsed, heuristic)
+    except Exception:
+        return heuristic
 
 
 def suggest_location_from_ip(client_id: str) -> str:
@@ -551,6 +726,12 @@ def main() -> None:
     listing_field_errors: dict[str, str] = st.session_state.listing_field_errors
     render_listing_field_highlights(listing_field_errors)
 
+    vision_enabled = bool(get_secret_value("OPENAI_API_KEY"))
+    if vision_enabled:
+        st.caption("AI vision model is enabled for uploaded photo analysis.")
+    else:
+        st.caption("AI vision model is not configured. Using heuristic photo analysis.")
+
     use_location_detect = st.checkbox("Allow location suggestion from my connection (permission-based)")
     if st.button("Suggest my current location", disabled=not use_location_detect):
         detected = suggest_location_from_ip(client_id)
@@ -631,6 +812,16 @@ def main() -> None:
                 photo_insights=photo_insights,
                 pipeline_price=price_recommendation["suggested_price"],
             )
+            ai_suggestion = generate_ai_suggestion_with_optional_vision(
+                title=title,
+                description=description,
+                location=location,
+                current_price=float(price),
+                photo_insights=photo_insights,
+                pipeline_price=price_recommendation["suggested_price"],
+                uploaded_photos=uploaded_photos or [],
+                photo_views=photo_views,
+            )
             st.session_state.listing_field_errors = {}
         except ValueError as exc:
             emit_audit_event(logger, "validation_failed", {"client": client_id, "error": str(exc)})
@@ -678,6 +869,8 @@ def main() -> None:
         st.write(price_recommendation["rationale"])
 
         st.markdown("### AI-assisted product summary")
+        st.write(f"Analysis source: **{ai_suggestion['source']}** ({ai_suggestion['model']})")
+        st.write(f"Model confidence: **{ai_suggestion['confidence']}**")
         st.write(f"Product name: **{ai_suggestion['product_name']}**")
         st.write(f"Estimated production year: **{ai_suggestion['year']}**")
         st.write(f"Condition assessment: **{ai_suggestion['condition']}**")
@@ -686,6 +879,11 @@ def main() -> None:
             f"(recommended list price: **${ai_suggestion['suggested_price']}**)"
         )
         st.text_area("Generated detailed description", value=ai_suggestion["generated_description"], height=180)
+
+        if ai_suggestion.get("issues_to_edit"):
+            st.markdown("### AI edits to improve listing")
+            for issue in ai_suggestion["issues_to_edit"]:
+                st.write(f"- {issue}")
 
         st.markdown("### Listing photos")
         if not uploaded_photos:

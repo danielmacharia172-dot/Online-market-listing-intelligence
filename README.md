@@ -34,6 +34,14 @@ export APP_PASSWORD=change-me
 export APP_AUDIT_LOG_PATH=./app_audit.log
 ```
 
+Optional AI vision analysis (for real model-based photo understanding):
+
+```bash
+export OPENAI_API_KEY=your_api_key
+export OPENAI_MODEL=gpt-4o-mini
+export OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
 A sample file is available at [.env.example](.env.example).
 
 ## Container deployment
@@ -55,6 +63,9 @@ For Streamlit Cloud, the app entry point is [streamlit_app.py](streamlit_app.py)
 APP_USERNAME="admin"
 APP_PASSWORD="change-me"
 APP_AUDIT_LOG_PATH="./app_audit.log"
+OPENAI_API_KEY="your_api_key"
+OPENAI_MODEL="gpt-4o-mini"
+OPENAI_BASE_URL="https://api.openai.com/v1"
 ```
 
 The repository includes the standard Streamlit configuration at [.streamlit/config.toml](.streamlit/config.toml).
