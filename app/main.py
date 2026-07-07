@@ -302,7 +302,7 @@ def authenticate_account(username: str, password: str) -> bool:
     if not verify_password(password, str(account.get("password_hash", ""))):
         return False
 
-    return is_contact_verified(account)
+    return True
 
 
 def create_account(username: str, password: str, email: str, phone: str) -> None:
@@ -310,8 +310,8 @@ def create_account(username: str, password: str, email: str, phone: str) -> None
         "password_hash": hash_password(password),
         "email": email,
         "phone": phone,
-        "verified_email": False,
-        "verified_phone": False,
+        "verified_email": True,
+        "verified_phone": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1190,11 +1190,7 @@ def main() -> None:
                     emit_audit_event(logger, "login", {"status": "success", "user": username.strip()})
                     st.rerun()
 
-                account = st.session_state.accounts.get(username.strip())
-                if account and not is_contact_verified(account):
-                    st.error("Account exists but is not verified yet. Complete verification to log in.")
-                else:
-                    st.error("Invalid username or password")
+                st.error("Invalid username or password")
                 emit_audit_event(logger, "login", {"status": "failed", "user": username.strip()})
             except Exception as exc:
                 logger.exception("Login flow failed")
@@ -1205,13 +1201,14 @@ def main() -> None:
                 new_username = st.text_input("New username")
                 new_password = st.text_input("New password", type="password")
                 confirm_new_password = st.text_input("Confirm password", type="password")
-                verify_method = st.selectbox("Verification method", ["Email", "Phone"])
-                verify_value = st.text_input("Email or phone for verification")
-                create_submit = st.form_submit_button("Create account and send verification code")
+                email_value = st.text_input("Email (optional)")
+                phone_value = st.text_input("Phone (optional)")
+                create_submit = st.form_submit_button("Create account")
 
             if create_submit:
                 clean_username = new_username.strip()
-                clean_contact = verify_value.strip()
+                clean_email = email_value.strip()
+                clean_phone = phone_value.strip()
 
                 if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", clean_username):
                     st.error("Username must be 3-32 chars and only include letters, numbers, _, ., or -")
@@ -1221,94 +1218,12 @@ def main() -> None:
                     st.error("Password must be at least 8 characters.")
                 elif new_password != confirm_new_password:
                     st.error("Passwords do not match.")
-                elif not clean_contact:
-                    st.error("Email or phone is required for verification.")
                 else:
-                    email = clean_contact if verify_method == "Email" else ""
-                    phone = clean_contact if verify_method == "Phone" else ""
-                    create_account(clean_username, new_password.strip(), email=email, phone=phone)
-                    st.session_state.account_profiles[clean_username] = {"email": email, "phone": phone}
+                    create_account(clean_username, new_password.strip(), email=clean_email, phone=clean_phone)
+                    st.session_state.account_profiles[clean_username] = {"email": clean_email, "phone": clean_phone}
                     st.session_state.user_roles[clean_username] = "Lister"
-
-                    rec = issue_verification_code(
-                        clean_username,
-                        "create_account",
-                        verify_method.lower(),
-                        clean_contact,
-                    )
-                    emit_audit_event(logger, "account_created", {"user": clean_username, "method": verify_method.lower()})
-                    delivered, note = deliver_verification_code(
-                        verify_method.lower(),
-                        clean_contact,
-                        str(rec["code"]),
-                        "account activation",
-                        clean_username,
-                    )
-                    if delivered:
-                        st.success("Account created. A private verification code was sent.")
-                    else:
-                        maybe_show_demo_code(str(rec["code"]))
-                        st.warning(note)
-
-            with st.form("verify_new_account_form"):
-                verify_username = st.text_input("Username to verify")
-                verify_method_check = st.selectbox("Verification method used", ["Email", "Phone"], key="verify_new_method")
-                verify_code = st.text_input("Verification code")
-                verify_submit = st.form_submit_button("Verify account")
-
-            if verify_submit:
-                pending = get_verification_record(verify_username.strip(), "create_account", verify_method_check.lower())
-                account = st.session_state.accounts.get(verify_username.strip())
-
-                if not pending:
-                    st.error("No account verification is pending for this username.")
-                elif verification_seconds_left(pending) == 0:
-                    st.error("Verification code expired. Use resend code to generate a new one.")
-                elif str(verify_code).strip() != str(pending.get("code", "")):
-                    st.error("Invalid verification code.")
-                elif not account:
-                    st.error("Account not found.")
-                else:
-                    if verify_method_check.lower() == "email":
-                        account["verified_email"] = True
-                    else:
-                        account["verified_phone"] = True
-                    remove_verification_record(verify_username.strip(), "create_account", verify_method_check.lower())
-                    emit_audit_event(logger, "account_verified", {"user": verify_username.strip()})
-                    st.success("Account verified. You can now log in.")
-
-            resend_create_user = st.text_input("Resend code username", key="resend_create_username")
-            resend_create_method = st.selectbox("Resend method", ["Email", "Phone"], key="resend_create_method")
-            existing_create = get_verification_record(resend_create_user.strip(), "create_account", resend_create_method.lower())
-            if existing_create:
-                st.caption(f"Create-account code expires in: {format_countdown(verification_seconds_left(existing_create))}")
-            if st.button("Resend create-account code", key="resend_create_code"):
-                account = st.session_state.accounts.get(resend_create_user.strip())
-                if not account:
-                    st.error("Account not found.")
-                else:
-                    destination = str(account.get("email", "")) if resend_create_method == "Email" else str(account.get("phone", ""))
-                    if not destination:
-                        st.error("No linked destination for this method.")
-                    else:
-                        rec = issue_verification_code(
-                            resend_create_user.strip(),
-                            "create_account",
-                            resend_create_method.lower(),
-                            destination,
-                        )
-                        delivered, note = deliver_verification_code(
-                            resend_create_method.lower(),
-                            destination,
-                            str(rec["code"]),
-                            "account activation",
-                            resend_create_user.strip(),
-                        )
-                        if delivered:
-                            st.success("A new private code was sent. It is valid for 10 minutes.")
-                        else:
-                            maybe_show_demo_code(str(rec["code"]))
-                            st.error(note)
+                    emit_audit_event(logger, "account_created", {"user": clean_username})
+                    st.success("Account created successfully. You can log in now.")
 
         with st.expander("Forgot password?"):
             with st.form("forgot_password_request_form"):
