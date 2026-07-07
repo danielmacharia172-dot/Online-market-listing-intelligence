@@ -804,14 +804,6 @@ def main() -> None:
                 view_label = photo_views[idx] if idx < len(photo_views) else "Other"
                 photo_insights.append(analyze_uploaded_photo(photo, view_label))
 
-            ai_suggestion = generate_ai_suggestion(
-                title=title,
-                description=description,
-                location=location,
-                current_price=float(price),
-                photo_insights=photo_insights,
-                pipeline_price=price_recommendation["suggested_price"],
-            )
             ai_suggestion = generate_ai_suggestion_with_optional_vision(
                 title=title,
                 description=description,
