@@ -1384,40 +1384,41 @@ def render_profile_panel(logger: Any) -> None:
                     emit_audit_event(logger, "transaction_outcome_saved", {"user": st.session_state.current_user, "transaction_id": selected_tx_id})
                     st.success("Transaction outcome saved.")
 
-    with st.expander("Vision diagnostics"):
-        diag = get_vision_diagnostics()
-        st.caption("Configuration checks only. Secret values are never shown.")
-        d1, d2, d3 = st.columns(3)
-        d1.metric("Provider", str(diag.get("provider", "local")))
-        d2.metric("Mode", "External" if bool(diag.get("external_enabled", False)) else "Local fallback")
-        d3.metric("Resolved from", str(diag.get("resolved_from", "local-fallback")))
+    if st.session_state.current_user == st.session_state.get("admin_username", ""):
+        with st.expander("Vision diagnostics"):
+            diag = get_vision_diagnostics()
+            st.caption("Configuration checks only. Secret values are never shown.")
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Provider", str(diag.get("provider", "local")))
+            d2.metric("Mode", "External" if bool(diag.get("external_enabled", False)) else "Local fallback")
+            d3.metric("Resolved from", str(diag.get("resolved_from", "local-fallback")))
 
-        st.write(f"Model: **{diag.get('model', '')}**")
-        st.write(f"Base URL: **{diag.get('base_url', '')}**")
-        st.write(f"VISION_API_KEY detected: **{'Yes' if diag.get('has_vision_api_key') else 'No'}**")
-        st.write(f"OPENAI_API_KEY detected: **{'Yes' if diag.get('has_openai_api_key') else 'No'}**")
-        st.write(f"OPENROUTER_API_KEY detected: **{'Yes' if diag.get('has_openrouter_api_key') else 'No'}**")
-        st.write(
-            f"Explicit provider setting detected: **{'Yes' if diag.get('has_explicit_provider_setting') else 'No'}**"
-        )
+            st.write(f"Model: **{diag.get('model', '')}**")
+            st.write(f"Base URL: **{diag.get('base_url', '')}**")
+            st.write(f"VISION_API_KEY detected: **{'Yes' if diag.get('has_vision_api_key') else 'No'}**")
+            st.write(f"OPENAI_API_KEY detected: **{'Yes' if diag.get('has_openai_api_key') else 'No'}**")
+            st.write(f"OPENROUTER_API_KEY detected: **{'Yes' if diag.get('has_openrouter_api_key') else 'No'}**")
+            st.write(
+                f"Explicit provider setting detected: **{'Yes' if diag.get('has_explicit_provider_setting') else 'No'}**"
+            )
 
-    with st.expander("Account store diagnostics"):
-        store_diag = get_auth_store_diagnostics()
-        st.caption("Shared account persistence check for multi-user login.")
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Accounts on disk", str(store_diag.get("accounts_count", 0)))
-        s2.metric("Profiles on disk", str(store_diag.get("profiles_count", 0)))
-        s3.metric("Roles on disk", str(store_diag.get("roles_count", 0)))
+        with st.expander("Account store diagnostics"):
+            store_diag = get_auth_store_diagnostics()
+            st.caption("Shared account persistence check for multi-user login.")
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Accounts on disk", str(store_diag.get("accounts_count", 0)))
+            s2.metric("Profiles on disk", str(store_diag.get("profiles_count", 0)))
+            s3.metric("Roles on disk", str(store_diag.get("roles_count", 0)))
 
-        st.write(f"Store file exists: **{'Yes' if store_diag.get('file_exists') else 'No'}**")
-        st.write(f"Store path: **{store_diag.get('path', '')}**")
-        st.write(f"Last modified: **{store_diag.get('last_modified', '') or 'Unknown'}**")
-        st.write(f"Accounts visible in this session: **{store_diag.get('current_session_accounts', 0)}**")
+            st.write(f"Store file exists: **{'Yes' if store_diag.get('file_exists') else 'No'}**")
+            st.write(f"Store path: **{store_diag.get('path', '')}**")
+            st.write(f"Last modified: **{store_diag.get('last_modified', '') or 'Unknown'}**")
+            st.write(f"Accounts visible in this session: **{store_diag.get('current_session_accounts', 0)}**")
 
-        if st.button("Reload shared account store", key="reload_auth_store_btn"):
-            reload_auth_store_into_session()
-            st.success("Shared account store reloaded into this session.")
-            st.rerun()
+            if st.button("Reload shared account store", key="reload_auth_store_btn"):
+                reload_auth_store_into_session()
+                st.success("Shared account store reloaded into this session.")
+                st.rerun()
 
     profiles = st.session_state.account_profiles
     profile = profiles.get(st.session_state.current_user, {"email": "", "phone": ""})
@@ -1599,6 +1600,7 @@ def main() -> None:
 
     bootstrap_password = get_effective_password(expected_username, expected_password)
     ensure_default_account(expected_username, bootstrap_password)
+    st.session_state.admin_username = expected_username
     st.session_state.account_profiles.setdefault(expected_username, {"email": "", "phone": ""})
     st.session_state.user_roles.setdefault(expected_username, "Lister")
 
