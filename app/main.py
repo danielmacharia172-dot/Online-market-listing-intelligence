@@ -70,17 +70,44 @@ def load_auth_store() -> dict[str, Any]:
     return {"accounts": {}, "account_profiles": {}, "user_roles": {}, "password_overrides": {}}
 
 
-def save_auth_store() -> None:
-    store = {
-        "accounts": st.session_state.accounts,
-        "account_profiles": st.session_state.account_profiles,
-        "user_roles": st.session_state.user_roles,
-        "password_overrides": st.session_state.password_overrides,
-    }
+def save_auth_store(username: str | None = None) -> None:
+    store = load_auth_store()
+
+    if username:
+        store_accounts = dict(store.get("accounts", {})) if isinstance(store.get("accounts", {}), dict) else {}
+        store_profiles = dict(store.get("account_profiles", {})) if isinstance(store.get("account_profiles", {}), dict) else {}
+        store_roles = dict(store.get("user_roles", {})) if isinstance(store.get("user_roles", {}), dict) else {}
+        store_password_overrides = dict(store.get("password_overrides", {})) if isinstance(store.get("password_overrides", {}), dict) else {}
+
+        if username in st.session_state.accounts:
+            store_accounts[username] = dict(st.session_state.accounts[username])
+        if username in st.session_state.account_profiles:
+            store_profiles[username] = dict(st.session_state.account_profiles[username])
+        if username in st.session_state.user_roles:
+            store_roles[username] = st.session_state.user_roles[username]
+        if username in st.session_state.password_overrides:
+            store_password_overrides[username] = st.session_state.password_overrides[username]
+
+        store = {
+            "accounts": store_accounts,
+            "account_profiles": store_profiles,
+            "user_roles": store_roles,
+            "password_overrides": store_password_overrides,
+        }
+    else:
+        store = {
+            "accounts": st.session_state.accounts,
+            "account_profiles": st.session_state.account_profiles,
+            "user_roles": st.session_state.user_roles,
+            "password_overrides": st.session_state.password_overrides,
+        }
+
     try:
         os.makedirs(os.path.dirname(AUTH_STORE_PATH), exist_ok=True)
-        with open(AUTH_STORE_PATH, "w", encoding="utf-8") as handle:
+        temp_path = f"{AUTH_STORE_PATH}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
             json.dump(store, handle, indent=2, sort_keys=True)
+        os.replace(temp_path, AUTH_STORE_PATH)
     except Exception:
         pass
 
@@ -551,7 +578,6 @@ def ensure_default_account(expected_username: str, expected_password: str) -> No
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
     ensure_account_programs(expected_username)
-    save_auth_store()
 
 
 def account_exists(username: str) -> bool:
@@ -579,7 +605,7 @@ def create_account(username: str, password: str, email: str, phone: str) -> None
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     ensure_account_programs(username)
-    save_auth_store()
+    save_auth_store(username)
 
 
 def save_remembered_credentials(client_id: str, username: str, password: str) -> None:
@@ -657,6 +683,7 @@ def init_state() -> None:
         "accounts": persisted.get("accounts", {}),
         "pending_verifications": {},
         "remembered_credentials_by_client": {},
+        "rate_limiter": None,
         "update_check_result": {
             "status": "unknown",
             "message": "Update check not run yet.",
@@ -1302,7 +1329,7 @@ def render_profile_panel(logger: Any) -> None:
     if st.button("Apply role", key="apply_profile_role"):
         st.session_state.active_role = role_choice
         st.session_state.user_roles[st.session_state.current_user] = role_choice
-        save_auth_store()
+        save_auth_store(st.session_state.current_user)
         st.success(f"Role switched to {role_choice}.")
         st.rerun()
 
@@ -1453,7 +1480,7 @@ def render_profile_panel(logger: Any) -> None:
                 maybe_show_demo_code(str(rec["code"]))
                 st.warning(note)
 
-        save_auth_store()
+        save_auth_store(st.session_state.current_user)
         emit_audit_event(logger, "backup_contact_updated", {"user": st.session_state.current_user})
         st.success("Contact saved and a private verification code was sent.")
 
@@ -1521,7 +1548,7 @@ def render_profile_panel(logger: Any) -> None:
             st.error("New password and confirmation do not match.")
         else:
             st.session_state.accounts[st.session_state.current_user]["password_hash"] = hash_password(new_password.strip())
-            save_auth_store()
+            save_auth_store(st.session_state.current_user)
             emit_audit_event(logger, "password_changed", {"user": st.session_state.current_user})
             st.success("Password changed.")
 
@@ -1591,7 +1618,8 @@ def main() -> None:
     init_state()
 
     logger = configure_logging()
-    rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
+    if not isinstance(st.session_state.get("rate_limiter"), RateLimiter):
+        st.session_state.rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
 
     try:
         expected_username, expected_password = get_auth_credentials(getattr(st, "secrets", None))
@@ -1810,7 +1838,7 @@ def main() -> None:
 
     try:
         client_id = get_client_identity(getattr(st.context, "headers", {}))
-        if not rate_limiter.allow_request(client_id):
+        if not st.session_state.rate_limiter.allow_request(client_id):
             emit_audit_event(logger, "rate_limited", {"client": client_id})
             st.error("Too many requests from this client. Please wait a minute and try again.")
             st.stop()
