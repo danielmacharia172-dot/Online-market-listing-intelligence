@@ -51,6 +51,188 @@ def get_first_secret_value(names: list[str]) -> str:
 
 
 APP_VERSION = "2026.07.07"
+PLATFORM_FEE_RATE = 0.08
+
+
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_account_programs(username: str) -> None:
+    programs = st.session_state.account_programs
+    profile = programs.setdefault(
+        username,
+        {
+            "trust": {
+                "kyc_lite_verified": False,
+                "kyc_country": "",
+                "kyc_name": "",
+                "verified_purchase_badge": False,
+                "verified_service_badge": False,
+            },
+            "intent": {
+                "goal": "",
+                "deadline": "",
+                "budget": 0.0,
+                "onboarded": False,
+            },
+            "lead_quality": {
+                "buyer_seriousness": 0,
+                "lead_count": 0,
+                "spam_strikes": 0,
+            },
+            "economics": {
+                "disclosed_fee_rate": PLATFORM_FEE_RATE,
+                "avg_seller_margin_pct": 0.0,
+            },
+            "outcomes": {
+                "completed_transactions": 0,
+                "on_time_rate": 0.0,
+                "avg_satisfaction": 0.0,
+                "roi_proxy_avg": 0.0,
+            },
+            "growth": {
+                "profile_score": 55,
+                "reputation_health": 75,
+                "recovery_actions_done": 0,
+            },
+        },
+    )
+    profile.setdefault("trust", {})
+    profile.setdefault("intent", {})
+    profile.setdefault("lead_quality", {})
+    profile.setdefault("economics", {})
+    profile.setdefault("outcomes", {})
+    profile.setdefault("growth", {})
+
+
+def compute_match_score(listing: dict[str, Any], intent: dict[str, Any]) -> int:
+    score = 50
+    goal = str(intent.get("goal", "")).strip().lower()
+    budget = float(intent.get("budget", 0.0) or 0.0)
+
+    title = str(listing.get("title", "")).lower()
+    description = str(listing.get("description", "")).lower()
+    listing_price = float(listing.get("price", 0.0) or 0.0)
+    quality_score = int(listing.get("quality_score", 50) or 50)
+    trust_score = int(listing.get("trust_score", 50) or 50)
+
+    if goal and any(token in f"{title} {description}" for token in goal.split()[:6]):
+        score += 18
+
+    if budget > 0 and listing_price > 0:
+        gap_pct = abs(listing_price - budget) / max(budget, 1)
+        if listing_price <= budget:
+            score += 15
+        if gap_pct <= 0.1:
+            score += 10
+        elif gap_pct <= 0.25:
+            score += 4
+        else:
+            score -= 8
+
+    score += int(quality_score * 0.12)
+    score += int(trust_score * 0.1)
+    return max(0, min(100, score))
+
+
+def compute_buyer_seriousness(brief_need: str, budget: float, timeline: str, prior_completions: int) -> int:
+    score = 20
+    if len(brief_need.strip()) >= 25:
+        score += 25
+    if budget > 0:
+        score += 20
+    if timeline.strip():
+        score += 15
+    score += min(20, prior_completions * 5)
+    return max(0, min(100, score))
+
+
+def evaluate_scam_risk_alert(message: str, seriousness: int) -> tuple[str, str]:
+    text = message.lower()
+    high_risk_terms = ["wire", "gift card", "crypto only", "pay outside", "telegram", "whatsapp", "code first"]
+    medium_risk_terms = ["urgent", "overnight", "trust me", "off platform"]
+
+    if any(term in text for term in high_risk_terms):
+        return "high", "Potential scam pattern detected. Avoid off-platform payments or sharing verification codes."
+    if any(term in text for term in medium_risk_terms) or seriousness < 35:
+        return "medium", "Risk signals detected. Keep all communication and payment terms in-platform."
+    return "low", "No major scam signals detected. Continue with normal caution."
+
+
+def can_submit_lead(buyer: str, listing_key: str) -> tuple[bool, str]:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    throttle = st.session_state.lead_throttle.setdefault(buyer, {"events": []})
+    events = [event for event in throttle.get("events", []) if now_ts - float(event.get("ts", 0)) <= 60]
+    throttle["events"] = events
+
+    per_listing_recent = [event for event in events if event.get("listing_key") == listing_key]
+    if len(events) >= 6:
+        return False, "Rate limit reached: wait about a minute before sending more leads."
+    if len(per_listing_recent) >= 2:
+        return False, "Too many repeated leads on this listing. Try again shortly."
+    return True, ""
+
+
+def register_lead_event(buyer: str, listing_key: str) -> None:
+    throttle = st.session_state.lead_throttle.setdefault(buyer, {"events": []})
+    throttle["events"].append({"ts": datetime.now(timezone.utc).timestamp(), "listing_key": listing_key})
+
+
+def compute_outcome_metrics_for_user(username: str) -> dict[str, float | int]:
+    related = [
+        tx for tx in st.session_state.transactions
+        if tx.get("status") == "completed" and (tx.get("buyer") == username or tx.get("lister") == username)
+    ]
+    if not related:
+        return {
+            "completed_transactions": 0,
+            "on_time_rate": 0.0,
+            "avg_satisfaction": 0.0,
+            "roi_proxy_avg": 0.0,
+        }
+
+    on_time_count = sum(1 for tx in related if bool(tx.get("delivered_on_time")))
+    satisfaction_values = [float(tx.get("satisfaction", 0.0) or 0.0) for tx in related if tx.get("satisfaction") is not None]
+    roi_values = [float(tx.get("roi_proxy", 0.0) or 0.0) for tx in related if tx.get("roi_proxy") is not None]
+
+    return {
+        "completed_transactions": len(related),
+        "on_time_rate": round((on_time_count / len(related)) * 100, 1),
+        "avg_satisfaction": round(sum(satisfaction_values) / len(satisfaction_values), 2) if satisfaction_values else 0.0,
+        "roi_proxy_avg": round(sum(roi_values) / len(roi_values), 2) if roi_values else 0.0,
+    }
+
+
+def refresh_program_badges_and_growth(username: str) -> None:
+    ensure_account_programs(username)
+    profile = st.session_state.account_programs[username]
+    outcomes = compute_outcome_metrics_for_user(username)
+    profile["outcomes"] = outcomes
+
+    trust = profile["trust"]
+    trust["verified_purchase_badge"] = outcomes["completed_transactions"] >= 1
+    trust["verified_service_badge"] = outcomes["avg_satisfaction"] >= 4.3 and outcomes["completed_transactions"] >= 2
+
+    growth = profile["growth"]
+    score = 40
+    if trust.get("kyc_lite_verified"):
+        score += 18
+    if trust.get("verified_purchase_badge"):
+        score += 12
+    if trust.get("verified_service_badge"):
+        score += 12
+    score += min(12, int(outcomes["completed_transactions"]) * 2)
+    score += int(min(6, outcomes["avg_satisfaction"]))
+    growth["profile_score"] = max(0, min(100, score))
+
+    health = 80
+    if outcomes["avg_satisfaction"] and outcomes["avg_satisfaction"] < 3.6:
+        health -= 25
+    if outcomes["on_time_rate"] and outcomes["on_time_rate"] < 70:
+        health -= 20
+    health += min(10, int(growth.get("recovery_actions_done", 0)) * 2)
+    growth["reputation_health"] = max(0, min(100, health))
 
 
 def hash_password(password: str) -> str:
@@ -288,6 +470,7 @@ def ensure_default_account(expected_username: str, expected_password: str) -> No
             "verified_phone": True,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+    ensure_account_programs(expected_username)
 
 
 def account_exists(username: str) -> bool:
@@ -314,6 +497,7 @@ def create_account(username: str, password: str, email: str, phone: str) -> None
         "verified_phone": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    ensure_account_programs(username)
 
 
 def save_remembered_credentials(client_id: str, username: str, password: str) -> None:
@@ -401,6 +585,10 @@ def init_state() -> None:
         "account_profiles": {},
         "password_overrides": {},
         "messages": [],
+        "account_programs": {},
+        "lead_throttle": {},
+        "lead_briefs": [],
+        "transactions": [],
         "detected_location": "",
         "location_confirmed_by_user": False,
         "listing_drafts": {},
@@ -408,6 +596,7 @@ def init_state() -> None:
             "title": "",
             "description": "",
             "price": 699,
+            "seller_cost_basis": 0.0,
             "location": "",
             "photo_views": {},
             "uploaded_photos": [],
@@ -423,6 +612,7 @@ def get_default_listing_draft(location_hint: str = "") -> dict[str, Any]:
         "title": "",
         "description": "",
         "price": 699,
+        "seller_cost_basis": 0.0,
         "location": location_hint,
         "photo_views": {},
         "uploaded_photos": [],
@@ -436,6 +626,7 @@ def load_user_listing_draft(username: str, location_hint: str = "") -> None:
             "title": str(stored.get("title", "")),
             "description": str(stored.get("description", "")),
             "price": int(stored.get("price", 699)),
+            "seller_cost_basis": float(stored.get("seller_cost_basis", 0.0) or 0.0),
             "location": str(stored.get("location", location_hint)),
             "photo_views": dict(stored.get("photo_views", {})),
             "uploaded_photos": list(stored.get("uploaded_photos", [])),
@@ -449,6 +640,7 @@ def save_listing_draft_for_user(username: str, draft: dict[str, Any]) -> None:
         "title": str(draft.get("title", "")),
         "description": str(draft.get("description", "")),
         "price": int(draft.get("price", 699)),
+        "seller_cost_basis": float(draft.get("seller_cost_basis", 0.0) or 0.0),
         "location": str(draft.get("location", "")),
         "photo_views": dict(draft.get("photo_views", {})),
         "uploaded_photos": list(draft.get("uploaded_photos", [])),
@@ -841,29 +1033,54 @@ def render_reviews_section(logger: Any, client_id: str) -> None:
     sort_order = st.selectbox("Sort reviews", ["Most recent", "Highest rating", "Lowest rating"])
     minimum_rating = st.slider("Minimum rating filter", min_value=1, max_value=5, value=1)
 
+    current_user = st.session_state.current_user
+    eligible_transactions = [
+        tx
+        for tx in st.session_state.transactions
+        if tx.get("buyer") == current_user
+        and tx.get("listing_key") == selected_listing_key
+        and tx.get("status") == "completed"
+        and not bool(tx.get("review_posted"))
+    ]
+
+    transaction_options = [f"{tx['id']} | ${tx.get('quote_amount', 0)}" for tx in eligible_transactions]
+
     with st.form("review_form"):
-        reviewer = st.text_input("Buyer name", placeholder="Alex")
         rating = st.slider("Rating", min_value=1, max_value=5, value=5)
         review_text = st.text_area("Review", placeholder="Quick pickup, item exactly as described.")
+        selected_tx_label = st.selectbox(
+            "Completed transaction (required for verified review)",
+            options=transaction_options if transaction_options else ["No eligible completed transaction"],
+        )
         review_submitted = st.form_submit_button("Post review")
 
     if review_submitted:
-        clean_reviewer = reviewer.strip()
         clean_review = review_text.strip()
 
-        if not clean_reviewer or not clean_review:
-            st.error("Buyer name and review text are required.")
+        if not clean_review:
+            st.error("Review text is required.")
+        elif not eligible_transactions:
+            st.error("Verified reviews require a completed transaction for this listing.")
         else:
+            selected_tx_id = selected_tx_label.split(" | ")[0].strip()
+            selected_tx = next((tx for tx in eligible_transactions if str(tx.get("id")) == selected_tx_id), None)
+            if not selected_tx:
+                st.error("Select a valid completed transaction.")
+                return
+
             review_record = {
-                "buyer": clean_reviewer,
+                "buyer": current_user,
                 "rating": rating,
                 "review": clean_review,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "listing_title": selected_listing_title,
                 "listing_location": selected_listing_location,
+                "verified": True,
+                "transaction_id": selected_tx_id,
             }
             bucket = reviews_by_listing.setdefault(selected_listing_key, [])
             bucket.insert(0, review_record)
+            selected_tx["review_posted"] = True
             emit_audit_event(
                 logger,
                 "review_posted",
@@ -871,9 +1088,11 @@ def render_reviews_section(logger: Any, client_id: str) -> None:
                     "client": client_id,
                     "rating": rating,
                     "listing_key": selected_listing_key,
+                    "transaction_id": selected_tx_id,
+                    "verified": True,
                 },
             )
-            st.success("Review posted.")
+            st.success("Verified review posted.")
 
     reviews = reviews_by_listing.get(selected_listing_key, [])
     reviews = [item for item in reviews if item["rating"] >= minimum_rating]
@@ -897,7 +1116,8 @@ def render_reviews_section(logger: Any, client_id: str) -> None:
     st.markdown("### Recent reviews")
     for item in reviews[:20]:
         stars = "*" * item["rating"]
-        st.markdown(f"**{item['buyer']}** ({item['rating']}/5) {stars}")
+        verified_label = " | Verified purchase" if item.get("verified") else ""
+        st.markdown(f"**{item['buyer']}** ({item['rating']}/5) {stars}{verified_label}")
         st.write(item["review"])
 
 
@@ -972,6 +1192,126 @@ def render_profile_panel(logger: Any) -> None:
         st.session_state.user_roles[st.session_state.current_user] = role_choice
         st.success(f"Role switched to {role_choice}.")
         st.rerun()
+
+    ensure_account_programs(st.session_state.current_user)
+    refresh_program_badges_and_growth(st.session_state.current_user)
+    program = st.session_state.account_programs[st.session_state.current_user]
+
+    st.markdown("#### Account programs")
+    trust = program["trust"]
+    outcomes = program["outcomes"]
+    growth = program["growth"]
+    col_prog_1, col_prog_2, col_prog_3 = st.columns(3)
+    col_prog_1.metric("Profile score", f"{growth.get('profile_score', 0)}/100")
+    col_prog_2.metric("Reputation health", f"{growth.get('reputation_health', 0)}/100")
+    col_prog_3.metric("Completed tx", str(outcomes.get("completed_transactions", 0)))
+
+    badges = []
+    if trust.get("kyc_lite_verified"):
+        badges.append("KYC-lite verified")
+    if trust.get("verified_purchase_badge"):
+        badges.append("Verified purchase badge")
+    if trust.get("verified_service_badge"):
+        badges.append("Verified service badge")
+    st.caption("Badges: " + (", ".join(badges) if badges else "No badges yet"))
+
+    with st.expander("Trust infrastructure"):
+        with st.form("kyc_lite_form"):
+            kyc_name = st.text_input("Legal name", value=str(trust.get("kyc_name", "")))
+            kyc_country = st.text_input("Country", value=str(trust.get("kyc_country", "")))
+            id_last4 = st.text_input("Government ID last 4 digits", max_chars=4)
+            selfie_confirm = st.checkbox("I confirm profile photo and ID belong to me")
+            submit_kyc = st.form_submit_button("Complete KYC-lite")
+
+        if submit_kyc:
+            if len(id_last4.strip()) == 4 and id_last4.strip().isdigit() and selfie_confirm and kyc_name.strip() and kyc_country.strip():
+                trust["kyc_lite_verified"] = True
+                trust["kyc_name"] = kyc_name.strip()
+                trust["kyc_country"] = kyc_country.strip()
+                emit_audit_event(logger, "kyc_lite_completed", {"user": st.session_state.current_user})
+                st.success("KYC-lite verification completed.")
+            else:
+                st.error("Provide legal name, country, 4 ID digits, and confirmation.")
+
+    with st.expander("Transaction and outcomes"):
+        relevant_txs = [
+            tx
+            for tx in st.session_state.transactions
+            if tx.get("buyer") == st.session_state.current_user or tx.get("lister") == st.session_state.current_user
+        ]
+        st.caption("Manage quotes, milestones, escrow/disputes, and record outcomes.")
+        if not relevant_txs:
+            st.info("No transactions yet.")
+        else:
+            tx_labels = [f"{tx['id']} | {tx['listing_title']} | {tx['status']}" for tx in relevant_txs]
+            selected_tx_label = st.selectbox("Select transaction", options=tx_labels)
+            selected_tx_id = selected_tx_label.split(" | ")[0].strip()
+            selected_tx = next((tx for tx in relevant_txs if str(tx.get("id")) == selected_tx_id), None)
+
+            if selected_tx:
+                st.write(f"Escrow: {'enabled' if selected_tx.get('escrow_enabled') else 'disabled'}")
+                st.write(f"Dispute: {'open' if selected_tx.get('dispute_open') else 'none'}")
+                with st.form(f"tx_outcome_form_{selected_tx_id}"):
+                    new_status = st.selectbox("Status", ["open", "quoted", "in_progress", "completed", "disputed"], index=["open", "quoted", "in_progress", "completed", "disputed"].index(str(selected_tx.get("status", "open")) if str(selected_tx.get("status", "open")) in ["open", "quoted", "in_progress", "completed", "disputed"] else "open"))
+                    delivered_on_time = st.checkbox("Delivered on time", value=bool(selected_tx.get("delivered_on_time", False)))
+                    satisfaction = st.slider("Satisfaction", min_value=1.0, max_value=5.0, step=0.1, value=float(selected_tx.get("satisfaction", 4.0) or 4.0))
+                    roi_proxy = st.number_input("ROI proxy (%)", min_value=-100.0, max_value=500.0, step=1.0, value=float(selected_tx.get("roi_proxy", 0.0) or 0.0))
+                    dispute_open = st.checkbox("Open dispute", value=bool(selected_tx.get("dispute_open", False)))
+                    save_outcome = st.form_submit_button("Save transaction outcome")
+
+                if save_outcome:
+                    selected_tx["status"] = new_status
+                    selected_tx["delivered_on_time"] = delivered_on_time
+                    selected_tx["satisfaction"] = satisfaction
+                    selected_tx["roi_proxy"] = roi_proxy
+                    selected_tx["dispute_open"] = dispute_open
+                    if new_status == "completed":
+                        selected_tx["completed_at"] = now_utc_iso()
+                    refresh_program_badges_and_growth(st.session_state.current_user)
+                    emit_audit_event(logger, "transaction_outcome_saved", {"user": st.session_state.current_user, "transaction_id": selected_tx_id})
+                    st.success("Transaction outcome saved.")
+
+    with st.expander("Transparent economics"):
+        fee_rate = float(program["economics"].get("disclosed_fee_rate", PLATFORM_FEE_RATE))
+        st.info(f"Upfront fee disclosure: platform fee is {round(fee_rate * 100, 1)}% per completed transaction.")
+        calc_price = st.number_input("Listing price for total-cost calculator", min_value=0.0, step=1.0, value=100.0)
+        calc_shipping = st.number_input("Shipping or service delivery cost", min_value=0.0, step=1.0, value=0.0)
+        calc_seller_cost = st.number_input("Seller cost basis", min_value=0.0, step=1.0, value=0.0)
+        fee_amount = round(calc_price * fee_rate, 2)
+        total_cost = round(calc_price + calc_shipping + fee_amount, 2)
+        margin_value = round(calc_price - calc_seller_cost - fee_amount, 2)
+        margin_pct = round((margin_value / calc_price) * 100, 1) if calc_price > 0 else 0.0
+        ec1, ec2, ec3 = st.columns(3)
+        ec1.metric("Platform fee", f"${fee_amount}")
+        ec2.metric("Buyer total cost", f"${total_cost}")
+        ec3.metric("Seller margin preview", f"{margin_pct}%")
+
+    with st.expander("Post-listing growth loop"):
+        playbook = [
+            "Complete KYC-lite to unlock trust visibility.",
+            "Collect 2+ verified reviews tied to completed transactions.",
+            "Keep on-time delivery above 85%.",
+            "Improve listing clarity with photos from front/back/side.",
+        ]
+        st.write("Seller playbook:")
+        for item in playbook:
+            st.write(f"- {item}")
+
+        conversion_leads = len([lead for lead in st.session_state.lead_briefs if lead.get("lister") == st.session_state.current_user])
+        conversion_completed = int(outcomes.get("completed_transactions", 0))
+        if conversion_leads >= 4 and conversion_completed == 0:
+            st.warning("Nudge: many leads but no completions. Tighten response SLAs and simplify quote milestones.")
+        elif conversion_completed > 0 and outcomes.get("avg_satisfaction", 0.0) < 4.0:
+            st.warning("Nudge: satisfaction is trending low. Improve expectation-setting in chat and milestone updates.")
+        else:
+            st.info("Nudge: keep collecting verified outcomes to grow ranking strength.")
+
+        if int(growth.get("reputation_health", 0)) < 60:
+            st.error("Reputation recovery flow: complete recovery actions to restore trust.")
+            if st.button("Complete one recovery action", key="complete_recovery_action"):
+                growth["recovery_actions_done"] = int(growth.get("recovery_actions_done", 0)) + 1
+                refresh_program_badges_and_growth(st.session_state.current_user)
+                st.success("Recovery action recorded.")
 
     profiles = st.session_state.account_profiles
     profile = profiles.get(st.session_state.current_user, {"email": "", "phone": ""})
@@ -1100,6 +1440,14 @@ def render_messages_panel(logger: Any, current_user: str) -> None:
         )
         st.write(f"Message: {msg['message']}")
         st.caption(f"Preferred contact: {msg['contact_preference']}")
+        seriousness = int(msg.get("buyer_seriousness", 50))
+        risk_level, risk_note = evaluate_scam_risk_alert(str(msg.get("message", "")), seriousness)
+        if risk_level == "high":
+            st.error(f"Scam-risk alert: {risk_note}")
+        elif risk_level == "medium":
+            st.warning(f"Scam-risk alert: {risk_note}")
+        else:
+            st.caption(f"Scam-risk: low | Buyer seriousness: {seriousness}/100")
 
 
 def render_update_assistant_panel(logger: Any) -> None:
@@ -1176,6 +1524,7 @@ def main() -> None:
                 if authenticate_account(username.strip(), password):
                     st.session_state.authenticated = True
                     st.session_state.current_user = username.strip()
+                    ensure_account_programs(username.strip())
                     st.session_state.pending_login_user = username.strip()
                     st.session_state.needs_upload_resume_choice = True
                     st.session_state.active_role = st.session_state.user_roles.get(username.strip(), "Lister")
@@ -1351,6 +1700,8 @@ def main() -> None:
 
     if st.session_state.current_user not in st.session_state.user_roles:
         st.session_state.user_roles[st.session_state.current_user] = "Lister"
+    ensure_account_programs(st.session_state.current_user)
+    refresh_program_badges_and_growth(st.session_state.current_user)
     st.session_state.active_role = st.session_state.user_roles.get(st.session_state.current_user, "Lister")
 
     nav_left, nav_center, nav_right = st.columns([1, 6, 1])
@@ -1378,26 +1729,120 @@ def main() -> None:
     if role == "Buyer":
         listings = st.session_state.analyzed_listings
         st.header("Marketplace")
+
+        buyer_program = st.session_state.account_programs.get(st.session_state.current_user, {})
+        intent = buyer_program.get("intent", {})
+        with st.expander("Intent and relevance engine", expanded=True):
+            with st.form("buyer_goal_onboarding_form"):
+                goal = st.text_input("I need", value=str(intent.get("goal", "")), placeholder="I need an iPhone 13 this week")
+                deadline = st.text_input("By when", value=str(intent.get("deadline", "")), placeholder="By Friday")
+                budget = st.number_input("Budget", min_value=0.0, step=10.0, value=float(intent.get("budget", 0.0) or 0.0))
+                save_goal = st.form_submit_button("Save goal-based onboarding")
+
+            if save_goal:
+                buyer_program.setdefault("intent", {})
+                buyer_program["intent"]["goal"] = goal.strip()
+                buyer_program["intent"]["deadline"] = deadline.strip()
+                buyer_program["intent"]["budget"] = budget
+                buyer_program["intent"]["onboarded"] = bool(goal.strip())
+                st.success("Intent profile saved.")
+
         if not listings:
             st.info("No listings available yet. Ask a lister to publish a listing first.")
         else:
-            for key, item in reversed(list(listings.items())):
+            scored_listings: list[tuple[int, dict[str, Any], str]] = []
+            buyer_intent = buyer_program.get("intent", {})
+            for key, item in listings.items():
+                match_score = compute_match_score(item, buyer_intent)
+                quality_weighted_rank = int(round((match_score * 0.5) + (int(item.get("quality_score", 50)) * 0.3) + (int(item.get("trust_score", 50)) * 0.2)))
+                scored_listings.append((quality_weighted_rank, item, key))
+
+            scored_listings.sort(key=lambda row: row[0], reverse=True)
+
+            for ranking_score, item, key in scored_listings:
                 with st.container(border=True):
                     st.subheader(f"{item['title']} - ${item['ai']['suggested_price']}")
                     st.caption(f"Location: {item['location']} | Listed by: {item['lister']}")
+                    st.caption(
+                        f"Match score: {compute_match_score(item, buyer_intent)}/100 | "
+                        f"Quality-weighted rank: {ranking_score}/100"
+                    )
                     st.write(item["ai"]["generated_description"])
                     st.write(f"Condition: {item['ai']['condition']} | Year: {item['ai']['year']}")
 
+                    fee_amount = round(float(item.get("price", 0.0)) * PLATFORM_FEE_RATE, 2)
+                    shipping_cost = st.number_input(
+                        "Shipping estimate",
+                        min_value=0.0,
+                        step=1.0,
+                        value=0.0,
+                        key=f"shipping_cost_{key}",
+                    )
+                    total_cost = round(float(item.get("price", 0.0)) + shipping_cost + fee_amount, 2)
+                    st.caption(
+                        f"Upfront economics: listing ${round(float(item.get('price', 0.0)), 2)} + "
+                        f"shipping ${round(shipping_cost, 2)} + fee ${fee_amount} = total ${total_cost}"
+                    )
+
                     with st.form(f"interest_form_{key}"):
+                        brief_need = st.text_area(
+                            "Mandatory brief: what you need",
+                            placeholder="Describe your exact requirement and constraints.",
+                        )
+                        brief_budget = st.number_input("Your budget", min_value=0.0, step=10.0, value=float(buyer_intent.get("budget", 0.0) or 0.0))
+                        brief_timeline = st.text_input("Timeline", placeholder="Need by this weekend")
                         message = st.text_area("Message to lister", placeholder="Hi, I am interested. Is this still available?")
                         contact_preference = st.selectbox("Preferred contact", ["In-platform messages", "Email", "Phone"])
+                        request_quote = st.checkbox("Request quote and milestone plan")
+                        quote_amount = st.number_input("Quote amount", min_value=0.0, step=1.0, value=float(item.get("ai", {}).get("suggested_price", 0) or 0))
+                        milestone_plan = st.text_area("Milestones", placeholder="1) Deposit 2) Delivery 3) Confirmation")
+                        escrow_enabled = st.checkbox("Use escrow")
                         send_interest = st.form_submit_button("I'm interested")
 
                     if send_interest:
+                        prior_completed = sum(
+                            1
+                            for tx in st.session_state.transactions
+                            if tx.get("buyer") == st.session_state.current_user and tx.get("status") == "completed"
+                        )
+                        seriousness = compute_buyer_seriousness(brief_need, brief_budget, brief_timeline, prior_completed)
+
+                        allowed, throttle_note = can_submit_lead(st.session_state.current_user, key)
+                        if not allowed:
+                            buyer_program.setdefault("lead_quality", {})
+                            buyer_program["lead_quality"]["spam_strikes"] = int(
+                                buyer_program["lead_quality"].get("spam_strikes", 0)
+                            ) + 1
+                            st.error(throttle_note)
+                            continue
+
                         clean_message = message.strip()
-                        if not clean_message:
+                        if not brief_need.strip():
+                            st.error("Mandatory brief is required before sending a lead.")
+                        elif not clean_message:
                             st.error("Please enter a message before sending.")
                         else:
+                            register_lead_event(st.session_state.current_user, key)
+                            st.session_state.lead_briefs.append(
+                                {
+                                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                                    "buyer": st.session_state.current_user,
+                                    "lister": item["lister"],
+                                    "listing_key": key,
+                                    "brief_need": brief_need.strip(),
+                                    "brief_budget": brief_budget,
+                                    "brief_timeline": brief_timeline.strip(),
+                                    "seriousness": seriousness,
+                                }
+                            )
+
+                            buyer_program.setdefault("lead_quality", {})
+                            buyer_program["lead_quality"]["buyer_seriousness"] = seriousness
+                            buyer_program["lead_quality"]["lead_count"] = int(
+                                buyer_program["lead_quality"].get("lead_count", 0)
+                            ) + 1
+
+                            risk_level, risk_note = evaluate_scam_risk_alert(clean_message, seriousness)
                             st.session_state.messages.append(
                                 {
                                     "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -1407,8 +1852,34 @@ def main() -> None:
                                     "lister": item["lister"],
                                     "message": clean_message,
                                     "contact_preference": contact_preference,
+                                    "buyer_seriousness": seriousness,
+                                    "risk_level": risk_level,
                                 }
                             )
+
+                            if request_quote:
+                                tx_id = f"TX-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{secrets.randbelow(900)+100}"
+                                st.session_state.transactions.append(
+                                    {
+                                        "id": tx_id,
+                                        "created_at": now_utc_iso(),
+                                        "listing_key": key,
+                                        "listing_title": item["title"],
+                                        "buyer": st.session_state.current_user,
+                                        "lister": item["lister"],
+                                        "quote_amount": quote_amount,
+                                        "milestones": milestone_plan.strip(),
+                                        "escrow_enabled": escrow_enabled,
+                                        "dispute_open": False,
+                                        "status": "quoted",
+                                        "delivered_on_time": False,
+                                        "satisfaction": None,
+                                        "roi_proxy": None,
+                                        "review_posted": False,
+                                    }
+                                )
+                                st.info(f"Quote workflow opened: {tx_id}")
+
                             emit_audit_event(
                                 logger,
                                 "buyer_interest_sent",
@@ -1416,9 +1887,16 @@ def main() -> None:
                                     "listing_key": key,
                                     "buyer": st.session_state.current_user,
                                     "lister": item["lister"],
+                                    "buyer_seriousness": seriousness,
+                                    "risk_level": risk_level,
                                 },
                             )
-                            st.success("Interest message sent to lister.")
+                            if risk_level == "high":
+                                st.error(f"Interest sent with high-risk alert: {risk_note}")
+                            elif risk_level == "medium":
+                                st.warning(f"Interest sent with caution: {risk_note}")
+                            else:
+                                st.success("Interest message sent to lister.")
 
         render_messages_panel(logger=logger, current_user=st.session_state.current_user)
         render_reviews_section(logger=logger, client_id=client_id)
@@ -1556,6 +2034,9 @@ def main() -> None:
         if "price" in listing_field_errors:
             st.error(listing_field_errors["price"])
 
+        seller_cost_basis = st.number_input("Seller cost basis (for margin preview)", min_value=0.0, step=1.0, value=float(active_draft.get("seller_cost_basis", 0.0) or 0.0))
+        active_draft["seller_cost_basis"] = float(seller_cost_basis)
+
         location = st.text_input(
             "Location",
             value=str(active_draft.get("location", default_location)),
@@ -1625,9 +2106,12 @@ def main() -> None:
             "location": location,
             "description": description,
             "price": float(price),
+            "seller_cost_basis": float(seller_cost_basis),
             "lister": st.session_state.current_user,
             "contact_email": profile.get("email", ""),
             "contact_phone": profile.get("phone", ""),
+            "quality_score": int(quality["score"]),
+            "trust_score": int(trust["trust_score"]),
             "ai": ai_suggestion,
         }
         st.session_state.last_listing_key = current_listing_key
@@ -1639,6 +2123,14 @@ def main() -> None:
         col2.metric("Fraud risk", f"{fraud['risk_score']}/100")
         col3.metric("Suggested price", f"${ai_suggestion['suggested_price']}")
         col4.metric("Trust score", f"{trust['trust_score']}/100")
+
+        fee_amount = round(float(price) * PLATFORM_FEE_RATE, 2)
+        margin_value = round(float(price) - float(seller_cost_basis) - fee_amount, 2)
+        margin_pct = round((margin_value / float(price)) * 100, 1) if float(price) > 0 else 0.0
+        st.caption(
+            f"Economics disclosure: platform fee {round(PLATFORM_FEE_RATE * 100, 1)}% = ${fee_amount}; "
+            f"seller margin preview ${margin_value} ({margin_pct}%)."
+        )
 
         st.markdown("### Quality insights")
         for item in quality["recommendations"]:
