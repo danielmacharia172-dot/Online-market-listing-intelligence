@@ -51,6 +51,77 @@ def get_first_secret_value(names: list[str]) -> str:
     return ""
 
 
+def get_state_repo() -> str:
+    return get_first_secret_value(["APP_STATE_REPO", "APP_GITHUB_REPO"]) or "danielmacharia172-dot/Online-market-listing-intelligence"
+
+
+def get_state_branch() -> str:
+    return get_first_secret_value(["APP_STATE_BRANCH"]) or "main"
+
+
+def get_state_github_token() -> str:
+    return get_first_secret_value(["APP_STATE_GITHUB_TOKEN", "APP_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"])
+
+
+def load_json_from_github(path: str) -> dict[str, Any] | None:
+    repo = get_state_repo().strip()
+    if not repo:
+        return None
+
+    branch = get_state_branch().strip() or "main"
+    raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path.lstrip('/')}"
+
+    try:
+        response = requests.get(raw_url, timeout=10)
+        if response.status_code == 200:
+            payload = json.loads(response.text)
+            return payload if isinstance(payload, dict) else None
+    except Exception:
+        pass
+
+    return None
+
+
+def save_json_to_github(path: str, payload: dict[str, Any]) -> None:
+    token = get_state_github_token().strip()
+    repo = get_state_repo().strip()
+    if not token or not repo:
+        return
+
+    branch = get_state_branch().strip() or "main"
+    normalized_path = path.lstrip("/")
+    api_url = f"https://api.github.com/repos/{repo}/contents/{normalized_path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    sha = ""
+    try:
+        lookup = requests.get(api_url, headers=headers, params={"ref": branch}, timeout=10)
+        if lookup.status_code == 200:
+            existing = lookup.json()
+            if isinstance(existing, dict):
+                sha = str(existing.get("sha", ""))
+    except Exception:
+        sha = ""
+
+    content = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    body = {
+        "message": f"Update {normalized_path}",
+        "content": base64.b64encode(content).decode("ascii"),
+        "branch": branch,
+    }
+    if sha:
+        body["sha"] = sha
+
+    try:
+        requests.put(api_url, headers=headers, json=body, timeout=15)
+    except Exception:
+        pass
+
+
 APP_VERSION = "2026.07.07"
 PLATFORM_FEE_RATE = 0.08
 AUTH_STORE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "auth_store.json")
@@ -70,6 +141,9 @@ def load_auth_store() -> dict[str, Any]:
                 return payload if isinstance(payload, dict) else {}
     except Exception:
         pass
+    remote_payload = load_json_from_github("data/auth_store.json")
+    if remote_payload:
+        return remote_payload
     return {"accounts": {}, "account_profiles": {}, "user_roles": {}, "password_overrides": {}}
 
 
@@ -81,6 +155,9 @@ def load_marketplace_store() -> dict[str, Any]:
                 return payload if isinstance(payload, dict) else {}
     except Exception:
         pass
+    remote_payload = load_json_from_github("data/marketplace_store.json")
+    if remote_payload:
+        return remote_payload
     return {
         "analyzed_listings": {},
         "buyer_reviews_by_listing": {},
@@ -131,6 +208,7 @@ def save_auth_store(username: str | None = None) -> None:
         with open(temp_path, "w", encoding="utf-8") as handle:
             json.dump(store, handle, indent=2, sort_keys=True)
         os.replace(temp_path, AUTH_STORE_PATH)
+        save_json_to_github("data/auth_store.json", store)
     except Exception:
         pass
 
@@ -171,6 +249,7 @@ def save_marketplace_store(*sections: str) -> None:
         with open(temp_path, "w", encoding="utf-8") as handle:
             json.dump(store, handle, indent=2, sort_keys=True)
         os.replace(temp_path, MARKETPLACE_STORE_PATH)
+        save_json_to_github("data/marketplace_store.json", store)
     except Exception:
         pass
 
