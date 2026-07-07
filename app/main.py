@@ -58,6 +58,54 @@ def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def get_vision_runtime_config() -> dict[str, Any]:
+    provider_raw = (
+        get_secret_value("VISION_PROVIDER")
+        or get_secret_value("AI_VISION_PROVIDER")
+        or ("openai" if get_secret_value("OPENAI_API_KEY") else "local")
+    ).strip().lower()
+
+    provider = provider_raw if provider_raw in {"openai", "openrouter", "custom", "local"} else "local"
+
+    base_url = (
+        get_secret_value("VISION_BASE_URL")
+        or get_secret_value("OPENAI_BASE_URL")
+        or ("https://openrouter.ai/api/v1" if provider == "openrouter" else "https://api.openai.com/v1")
+    )
+
+    model = (
+        get_secret_value("VISION_MODEL")
+        or get_secret_value("OPENAI_MODEL")
+        or ("openai/gpt-4o-mini" if provider == "openrouter" else "gpt-4o-mini")
+    )
+
+    api_key = (
+        get_secret_value("VISION_API_KEY")
+        or get_secret_value("OPENAI_API_KEY")
+        or get_secret_value("OPENROUTER_API_KEY")
+    )
+
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    if provider == "openrouter":
+        headers["HTTP-Referer"] = get_secret_value("OPENROUTER_HTTP_REFERER") or "https://streamlit.io"
+        headers["X-Title"] = get_secret_value("OPENROUTER_APP_TITLE") or "OfferUp AI Listing Intelligence"
+
+    external_enabled = bool(api_key) and provider in {"openai", "openrouter", "custom"}
+
+    return {
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "headers": headers,
+        "external_enabled": external_enabled,
+    }
+
+
 def ensure_account_programs(username: str) -> None:
     programs = st.session_state.account_programs
     profile = programs.setdefault(
@@ -820,6 +868,53 @@ def sanitize_ai_vision_output(parsed: dict[str, Any], heuristic_fallback: dict[s
     }
 
 
+def apply_local_vision_model(
+    heuristic: dict[str, Any],
+    photo_insights: list[dict[str, Any]],
+    photo_views: list[str],
+) -> dict[str, Any]:
+    result = dict(heuristic)
+    issues = list(result.get("issues_to_edit", []))
+
+    normalized_views = {str(view).strip().lower() for view in photo_views}
+    required_views = {"front side", "back side", "sideways"}
+    coverage_ratio = len(required_views.intersection(normalized_views)) / len(required_views)
+
+    if coverage_ratio < 1.0:
+        issues.append("Upload front, back, and side photos to improve buyer confidence.")
+
+    avg_megapixels = 0.0
+    avg_file_size_kb = 0.0
+    if photo_insights:
+        avg_megapixels = sum(float(item.get("megapixels", 0.0) or 0.0) for item in photo_insights) / len(photo_insights)
+        avg_file_size_kb = sum(float(item.get("file_size_kb", 0.0) or 0.0) for item in photo_insights) / len(photo_insights)
+
+    if avg_megapixels and avg_megapixels < 1.3:
+        issues.append("Photos are low resolution; retake in better lighting and focus.")
+    if avg_file_size_kb and avg_file_size_kb < 120:
+        issues.append("Image files are heavily compressed; upload clearer originals.")
+
+    suggested_price = int(result.get("suggested_price", 0) or 0)
+    if coverage_ratio < 0.67:
+        suggested_price = int(round(suggested_price * 0.94))
+    elif avg_megapixels and avg_megapixels >= 3.5 and coverage_ratio == 1.0:
+        suggested_price = int(round(suggested_price * 1.03))
+
+    market_low = int(result.get("market_low", 0) or 0)
+    market_high = int(result.get("market_high", 0) or 0)
+    if suggested_price > 0 and market_low > 0 and market_high > 0:
+        midpoint = int(round((market_low + market_high) / 2))
+        if suggested_price > midpoint * 1.2:
+            suggested_price = int(round(midpoint * 1.12))
+
+    result["suggested_price"] = max(1, suggested_price) if suggested_price else result["suggested_price"]
+    result["issues_to_edit"] = issues[:10]
+    result["source"] = "local-vision"
+    result["model"] = "local-vision-lite-v1"
+    result["confidence"] = "medium-high" if coverage_ratio == 1.0 and avg_megapixels >= 2.0 else "medium"
+    return result
+
+
 def generate_ai_suggestion_with_optional_vision(
     title: str,
     description: str,
@@ -839,12 +934,14 @@ def generate_ai_suggestion_with_optional_vision(
         pipeline_price=pipeline_price,
     )
 
-    api_key = get_secret_value("OPENAI_API_KEY")
-    if not api_key or not uploaded_photos:
+    if not uploaded_photos:
         return heuristic
 
-    model = get_secret_value("OPENAI_MODEL") or "gpt-4o-mini"
-    base_url = get_secret_value("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+    local_vision = apply_local_vision_model(heuristic, photo_insights, photo_views)
+    vision_config = get_vision_runtime_config()
+
+    if not vision_config["external_enabled"]:
+        return local_vision
 
     try:
         image_blocks = []
@@ -873,7 +970,7 @@ def generate_ai_suggestion_with_optional_vision(
         )
 
         payload = {
-            "model": model,
+            "model": vision_config["model"],
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
             "messages": [
@@ -885,27 +982,24 @@ def generate_ai_suggestion_with_optional_vision(
         }
 
         response = requests.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            f"{str(vision_config['base_url']).rstrip('/')}/chat/completions",
+            headers=vision_config["headers"],
             json=payload,
             timeout=35,
         )
         if response.status_code >= 400:
-            return heuristic
+            return local_vision
 
         body = response.json()
         text_content = str(body["choices"][0]["message"]["content"])
         parsed = parse_json_object(text_content)
         if not parsed:
-            return heuristic
+            return local_vision
 
-        parsed.setdefault("model", model)
-        return sanitize_ai_vision_output(parsed, heuristic)
+        parsed.setdefault("model", str(vision_config["model"]))
+        return sanitize_ai_vision_output(parsed, local_vision)
     except Exception:
-        return heuristic
+        return local_vision
 
 
 def suggest_location_from_ip(client_id: str) -> str:
@@ -1600,9 +1694,9 @@ def main() -> None:
 
     with st.sidebar:
         st.caption("Navigation")
-        if st.button("👤 Profile", key="sidebar_profile_icon", use_container_width=True):
+        if st.button("👤", key="sidebar_profile_icon", help="Profile", use_container_width=True):
             st.session_state.active_panel = "profile"
-        if st.button("💬 Messages", key="sidebar_messages_icon", use_container_width=True):
+        if st.button("💬", key="sidebar_messages_icon", help="Messages", use_container_width=True):
             st.session_state.active_panel = "messages"
 
     st.caption(
@@ -1699,11 +1793,13 @@ def main() -> None:
     listing_field_errors: dict[str, str] = st.session_state.listing_field_errors
     render_listing_field_highlights(listing_field_errors)
 
-    vision_enabled = bool(get_secret_value("OPENAI_API_KEY"))
-    if vision_enabled:
-        st.caption("AI vision model is enabled for uploaded photo analysis.")
+    vision_config = get_vision_runtime_config()
+    if vision_config["external_enabled"]:
+        st.caption(
+            f"AI vision model is enabled ({vision_config['provider']}: {vision_config['model']})."
+        )
     else:
-        st.caption("AI vision model is not configured. Using heuristic photo analysis.")
+        st.caption("AI vision runs in local mode (local-vision-lite-v1). Configure keys to use external model providers.")
 
     use_location_detect = st.checkbox(
         "Allow location suggestion from my connection (permission-based)",
