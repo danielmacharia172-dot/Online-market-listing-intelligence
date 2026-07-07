@@ -4,7 +4,9 @@ import json
 import os
 import re
 import secrets
+import smtplib
 from datetime import datetime, timezone
+from email.mime.text import MIMEText
 from typing import Any
 
 import requests
@@ -120,6 +122,103 @@ def remove_verification_record(username: str, purpose: str, method: str) -> None
 def maybe_show_demo_code(code: str) -> None:
     if get_secret_value("DEMO_SHOW_VERIFICATION_CODES").lower() == "true":
         st.info(f"Demo only - verification code: {code}")
+
+
+def send_code_email(destination: str, code: str, purpose: str, username: str) -> tuple[bool, str]:
+    subject = f"Your verification code for {purpose}"
+    body = (
+        f"Hello {username},\n\n"
+        f"Your verification code is: {code}\n"
+        "This code expires in 10 minutes.\n\n"
+        "If you did not request this, ignore this email."
+    )
+
+    sendgrid_api_key = get_secret_value("SENDGRID_API_KEY")
+    sendgrid_from = get_secret_value("VERIFICATION_EMAIL_FROM")
+    if sendgrid_api_key and sendgrid_from:
+        payload = {
+            "personalizations": [{"to": [{"email": destination}]}],
+            "from": {"email": sendgrid_from},
+            "subject": subject,
+            "content": [{"type": "text/plain", "value": body}],
+        }
+        try:
+            response = requests.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={
+                    "Authorization": f"Bearer {sendgrid_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=10,
+            )
+            if 200 <= response.status_code < 300:
+                return True, "Verification code sent by email."
+            return False, "Email delivery failed through SendGrid."
+        except Exception:
+            return False, "Email delivery failed through SendGrid runtime error."
+
+    smtp_host = get_secret_value("SMTP_HOST")
+    smtp_port = int(get_secret_value("SMTP_PORT") or "587")
+    smtp_user = get_secret_value("SMTP_USERNAME")
+    smtp_password = get_secret_value("SMTP_PASSWORD")
+    smtp_from = get_secret_value("VERIFICATION_EMAIL_FROM")
+    smtp_ssl = get_secret_value("SMTP_USE_SSL").lower() == "true"
+
+    if smtp_host and smtp_user and smtp_password and smtp_from:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = smtp_from
+        msg["To"] = destination
+
+        try:
+            if smtp_ssl:
+                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as server:
+                    server.login(smtp_user, smtp_password)
+                    server.sendmail(smtp_from, [destination], msg.as_string())
+            else:
+                with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                    server.starttls()
+                    server.login(smtp_user, smtp_password)
+                    server.sendmail(smtp_from, [destination], msg.as_string())
+            return True, "Verification code sent by email."
+        except Exception:
+            return False, "Email delivery failed through SMTP runtime error."
+
+    return False, "Email delivery is not configured."
+
+
+def send_code_sms(destination: str, code: str, purpose: str, username: str) -> tuple[bool, str]:
+    sid = get_secret_value("TWILIO_ACCOUNT_SID")
+    token = get_secret_value("TWILIO_AUTH_TOKEN")
+    from_number = get_secret_value("TWILIO_FROM_NUMBER")
+
+    if not sid or not token or not from_number:
+        return False, "SMS delivery is not configured."
+
+    msg = f"{username}, your {purpose} verification code is {code}. It expires in 10 minutes."
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+    try:
+        response = requests.post(
+            url,
+            data={"To": destination, "From": from_number, "Body": msg},
+            auth=(sid, token),
+            timeout=10,
+        )
+        if 200 <= response.status_code < 300:
+            return True, "Verification code sent by SMS."
+        return False, "SMS delivery failed through Twilio."
+    except Exception:
+        return False, "SMS delivery failed through Twilio runtime error."
+
+
+def deliver_verification_code(method: str, destination: str, code: str, purpose: str, username: str) -> tuple[bool, str]:
+    normalized_method = method.strip().lower()
+    if normalized_method == "email":
+        return send_code_email(destination, code, purpose, username)
+    if normalized_method == "phone":
+        return send_code_sms(destination, code, purpose, username)
+    return False, "Unsupported verification method."
 
 
 def ensure_default_account(expected_username: str, expected_password: str) -> None:
@@ -839,10 +938,16 @@ def render_profile_panel(logger: Any) -> None:
 
         if clean_email:
             rec = issue_verification_code(st.session_state.current_user, "contact_verify", "email", clean_email)
-            maybe_show_demo_code(str(rec["code"]))
+            delivered, note = deliver_verification_code("email", clean_email, str(rec["code"]), "contact verification", st.session_state.current_user)
+            if not delivered:
+                maybe_show_demo_code(str(rec["code"]))
+                st.warning(note)
         if clean_phone:
             rec = issue_verification_code(st.session_state.current_user, "contact_verify", "phone", clean_phone)
-            maybe_show_demo_code(str(rec["code"]))
+            delivered, note = deliver_verification_code("phone", clean_phone, str(rec["code"]), "contact verification", st.session_state.current_user)
+            if not delivered:
+                maybe_show_demo_code(str(rec["code"]))
+                st.warning(note)
 
         emit_audit_event(logger, "backup_contact_updated", {"user": st.session_state.current_user})
         st.success("Contact saved and a private verification code was sent.")
@@ -885,8 +990,12 @@ def render_profile_panel(logger: Any) -> None:
                 st.error("No linked destination found for this method.")
             else:
                 rec = issue_verification_code(st.session_state.current_user, "contact_verify", method_key, active_destination)
-                maybe_show_demo_code(str(rec["code"]))
-                st.success("A new verification code was sent. It is valid for 10 minutes.")
+                delivered, note = deliver_verification_code(method_key, active_destination, str(rec["code"]), "contact verification", st.session_state.current_user)
+                if delivered:
+                    st.success("A new private verification code was sent. It is valid for 10 minutes.")
+                else:
+                    maybe_show_demo_code(str(rec["code"]))
+                    st.error(note)
 
     st.markdown("#### Change password")
     with st.form("change_password_form"):
@@ -1072,8 +1181,18 @@ def main() -> None:
                         clean_contact,
                     )
                     emit_audit_event(logger, "account_created", {"user": clean_username, "method": verify_method.lower()})
-                    st.success("Account created. Enter your verification code below to activate login.")
-                    maybe_show_demo_code(str(rec["code"]))
+                    delivered, note = deliver_verification_code(
+                        verify_method.lower(),
+                        clean_contact,
+                        str(rec["code"]),
+                        "account activation",
+                        clean_username,
+                    )
+                    if delivered:
+                        st.success("Account created. A private verification code was sent.")
+                    else:
+                        maybe_show_demo_code(str(rec["code"]))
+                        st.warning(note)
 
             with st.form("verify_new_account_form"):
                 verify_username = st.text_input("Username to verify")
@@ -1122,8 +1241,18 @@ def main() -> None:
                             resend_create_method.lower(),
                             destination,
                         )
-                        maybe_show_demo_code(str(rec["code"]))
-                        st.success("A new code was sent. It is valid for 10 minutes.")
+                        delivered, note = deliver_verification_code(
+                            resend_create_method.lower(),
+                            destination,
+                            str(rec["code"]),
+                            "account activation",
+                            resend_create_user.strip(),
+                        )
+                        if delivered:
+                            st.success("A new private code was sent. It is valid for 10 minutes.")
+                        else:
+                            maybe_show_demo_code(str(rec["code"]))
+                            st.error(note)
 
         with st.expander("Forgot password?"):
             with st.form("forgot_password_request_form"):
@@ -1163,8 +1292,18 @@ def main() -> None:
                         "password_reset_requested",
                         {"user": recover_username.strip(), "method": recovery_method.lower()},
                     )
-                    st.success("Recovery code generated. Enter it below to complete password reset.")
-                    maybe_show_demo_code(str(rec["code"]))
+                    delivered, note = deliver_verification_code(
+                        recovery_method.lower(),
+                        recovery_value.strip(),
+                        str(rec["code"]),
+                        "password reset",
+                        recover_username.strip(),
+                    )
+                    if delivered:
+                        st.success("Recovery code sent privately. Enter it below to complete password reset.")
+                    else:
+                        maybe_show_demo_code(str(rec["code"]))
+                        st.warning(note)
 
             with st.form("forgot_password_verify_form"):
                 verify_reset_username = st.text_input("Username for reset verification")
@@ -1214,8 +1353,18 @@ def main() -> None:
                             destination,
                             new_password_hash=str(existing.get("new_password_hash", "")),
                         )
-                        maybe_show_demo_code(str(rec["code"]))
-                        st.success("A new recovery code was sent. It is valid for 10 minutes.")
+                        delivered, note = deliver_verification_code(
+                            resend_reset_method.lower(),
+                            destination,
+                            str(rec["code"]),
+                            "password reset",
+                            resend_reset_user.strip(),
+                        )
+                        if delivered:
+                            st.success("A new private recovery code was sent. It is valid for 10 minutes.")
+                        else:
+                            maybe_show_demo_code(str(rec["code"]))
+                            st.error(note)
         st.stop()
 
     try:

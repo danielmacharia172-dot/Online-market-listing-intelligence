@@ -30,6 +30,12 @@ The app now includes a basic security layer suitable for internal or early produ
 - input validation to reject malformed or oversized submissions
 - structured audit logging to stdout and an optional file
 
+Verification code delivery (private):
+
+- Email via SendGrid API or SMTP
+- SMS via Twilio
+- Codes expire in 10 minutes and each resend generates a new code
+
 Set the following environment variables before launching the app:
 
 ```bash
@@ -37,9 +43,25 @@ export APP_USERNAME=admin
 export APP_PASSWORD=change-me
 export APP_AUDIT_LOG_PATH=./app_audit.log
 export APP_AUTH_SALT=change-this-auth-salt
-export DEMO_SHOW_VERIFICATION_CODES=true
+export DEMO_SHOW_VERIFICATION_CODES=false
 export APP_GITHUB_REPO=danielmacharia172-dot/Online-market-listing-intelligence
 export APP_BUILD_COMMIT=unknown
+
+# Email (choose SendGrid OR SMTP)
+export VERIFICATION_EMAIL_FROM=no-reply@example.com
+export SENDGRID_API_KEY=
+
+# SMTP fallback
+export SMTP_HOST=
+export SMTP_PORT=587
+export SMTP_USERNAME=
+export SMTP_PASSWORD=
+export SMTP_USE_SSL=false
+
+# SMS (Twilio)
+export TWILIO_ACCOUNT_SID=
+export TWILIO_AUTH_TOKEN=
+export TWILIO_FROM_NUMBER=
 ```
 
 Optional AI vision analysis (for real model-based photo understanding):
@@ -72,9 +94,19 @@ APP_USERNAME="admin"
 APP_PASSWORD="change-me"
 APP_AUDIT_LOG_PATH="./app_audit.log"
 APP_AUTH_SALT="change-this-auth-salt"
-DEMO_SHOW_VERIFICATION_CODES="true"
+DEMO_SHOW_VERIFICATION_CODES="false"
 APP_GITHUB_REPO="danielmacharia172-dot/Online-market-listing-intelligence"
 APP_BUILD_COMMIT="unknown"
+VERIFICATION_EMAIL_FROM="no-reply@example.com"
+SENDGRID_API_KEY=""
+SMTP_HOST=""
+SMTP_PORT="587"
+SMTP_USERNAME=""
+SMTP_PASSWORD=""
+SMTP_USE_SSL="false"
+TWILIO_ACCOUNT_SID=""
+TWILIO_AUTH_TOKEN=""
+TWILIO_FROM_NUMBER=""
 OPENAI_API_KEY="your_api_key"
 OPENAI_MODEL="gpt-4o-mini"
 OPENAI_BASE_URL="https://api.openai.com/v1"
