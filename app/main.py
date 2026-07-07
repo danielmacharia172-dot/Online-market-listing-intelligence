@@ -85,6 +85,38 @@ def save_auth_store() -> None:
         pass
 
 
+def reload_auth_store_into_session() -> None:
+    persisted = load_auth_store()
+    st.session_state.accounts = dict(persisted.get("accounts", {}))
+    st.session_state.account_profiles = dict(persisted.get("account_profiles", {}))
+    st.session_state.user_roles = dict(persisted.get("user_roles", {}))
+    st.session_state.password_overrides = dict(persisted.get("password_overrides", {}))
+
+
+def get_auth_store_diagnostics() -> dict[str, Any]:
+    persisted = load_auth_store()
+    accounts = persisted.get("accounts", {}) if isinstance(persisted, dict) else {}
+    profiles = persisted.get("account_profiles", {}) if isinstance(persisted, dict) else {}
+    roles = persisted.get("user_roles", {}) if isinstance(persisted, dict) else {}
+    try:
+        file_exists = os.path.exists(AUTH_STORE_PATH)
+        last_modified = datetime.fromtimestamp(os.path.getmtime(AUTH_STORE_PATH), timezone.utc).isoformat() if file_exists else ""
+    except Exception:
+        file_exists = False
+        last_modified = ""
+
+    return {
+        "file_exists": file_exists,
+        "path": AUTH_STORE_PATH,
+        "last_modified": last_modified,
+        "accounts_count": len(accounts) if isinstance(accounts, dict) else 0,
+        "profiles_count": len(profiles) if isinstance(profiles, dict) else 0,
+        "roles_count": len(roles) if isinstance(roles, dict) else 0,
+        "current_session_accounts": len(st.session_state.accounts),
+        "current_session_user": st.session_state.current_user,
+    }
+
+
 def get_vision_runtime_config() -> dict[str, Any]:
     provider_raw = (
         get_secret_value("VISION_PROVIDER")
@@ -1368,6 +1400,24 @@ def render_profile_panel(logger: Any) -> None:
         st.write(
             f"Explicit provider setting detected: **{'Yes' if diag.get('has_explicit_provider_setting') else 'No'}**"
         )
+
+    with st.expander("Account store diagnostics"):
+        store_diag = get_auth_store_diagnostics()
+        st.caption("Shared account persistence check for multi-user login.")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Accounts on disk", str(store_diag.get("accounts_count", 0)))
+        s2.metric("Profiles on disk", str(store_diag.get("profiles_count", 0)))
+        s3.metric("Roles on disk", str(store_diag.get("roles_count", 0)))
+
+        st.write(f"Store file exists: **{'Yes' if store_diag.get('file_exists') else 'No'}**")
+        st.write(f"Store path: **{store_diag.get('path', '')}**")
+        st.write(f"Last modified: **{store_diag.get('last_modified', '') or 'Unknown'}**")
+        st.write(f"Accounts visible in this session: **{store_diag.get('current_session_accounts', 0)}**")
+
+        if st.button("Reload shared account store", key="reload_auth_store_btn"):
+            reload_auth_store_into_session()
+            st.success("Shared account store reloaded into this session.")
+            st.rerun()
 
     profiles = st.session_state.account_profiles
     profile = profiles.get(st.session_state.current_user, {"email": "", "phone": ""})
