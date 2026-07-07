@@ -162,16 +162,16 @@ def send_code_email(destination: str, code: str, purpose: str, username: str) ->
             )
             if 200 <= response.status_code < 300:
                 return True, "Verification code sent by email."
-                return False, "Email delivery failed through SendGrid API response."
+            return False, "Email delivery failed through SendGrid API response."
         except Exception:
             return False, "Email delivery failed through SendGrid runtime error."
 
-            smtp_host = get_first_secret_value(["SMTP_HOST", "EMAIL_HOST"])
-            smtp_port = int(get_first_secret_value(["SMTP_PORT", "EMAIL_PORT"]) or "587")
-            smtp_user = get_first_secret_value(["SMTP_USERNAME", "SMTP_USER", "EMAIL_USERNAME", "EMAIL_USER"])
-            smtp_password = get_first_secret_value(["SMTP_PASSWORD", "EMAIL_PASSWORD"])
-            smtp_from = get_first_secret_value(["VERIFICATION_EMAIL_FROM", "SMTP_FROM", "EMAIL_FROM"])
-            smtp_ssl = get_first_secret_value(["SMTP_USE_SSL", "EMAIL_USE_SSL"]).lower() == "true"
+    smtp_host = get_first_secret_value(["SMTP_HOST", "EMAIL_HOST"])
+    smtp_port = int(get_first_secret_value(["SMTP_PORT", "EMAIL_PORT"]) or "587")
+    smtp_user = get_first_secret_value(["SMTP_USERNAME", "SMTP_USER", "EMAIL_USERNAME", "EMAIL_USER"])
+    smtp_password = get_first_secret_value(["SMTP_PASSWORD", "EMAIL_PASSWORD"])
+    smtp_from = get_first_secret_value(["VERIFICATION_EMAIL_FROM", "SMTP_FROM", "EMAIL_FROM"])
+    smtp_ssl = get_first_secret_value(["SMTP_USE_SSL", "EMAIL_USE_SSL"]).lower() == "true"
 
     if smtp_host and smtp_user and smtp_password and smtp_from:
         msg = MIMEText(body)
