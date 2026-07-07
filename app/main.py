@@ -1840,7 +1840,7 @@ def main() -> None:
     elif st.session_state.active_panel == "messages":
         render_messages_panel(logger=logger, current_user=st.session_state.current_user)
 
-    if st.session_state.current_user == expected_username:
+    if st.session_state.current_user == st.session_state.get("admin_username", expected_username):
         render_update_assistant_panel(logger=logger)
 
     role = st.session_state.active_role
