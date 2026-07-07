@@ -69,7 +69,30 @@ def load_json_from_github(path: str) -> dict[str, Any] | None:
         return None
 
     branch = get_state_branch().strip() or "main"
-    raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path.lstrip('/')}"
+    token = get_state_github_token().strip()
+    normalized_path = path.lstrip("/")
+
+    if token:
+        api_url = f"https://api.github.com/repos/{repo}/contents/{normalized_path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            response = requests.get(api_url, headers=headers, params={"ref": branch}, timeout=10)
+            if response.status_code == 200:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    content = str(payload.get("content", "")).strip()
+                    if content:
+                        decoded = base64.b64decode(content).decode("utf-8")
+                        parsed = json.loads(decoded)
+                        return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            pass
+
+    raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{normalized_path}"
 
     try:
         response = requests.get(raw_url, timeout=10)
