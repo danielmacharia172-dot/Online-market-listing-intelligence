@@ -42,6 +42,14 @@ def get_secret_value(name: str) -> str:
         return ""
 
 
+def get_first_secret_value(names: list[str]) -> str:
+    for name in names:
+        value = get_secret_value(name)
+        if value:
+            return value
+    return ""
+
+
 APP_VERSION = "2026.07.07"
 
 
@@ -133,8 +141,8 @@ def send_code_email(destination: str, code: str, purpose: str, username: str) ->
         "If you did not request this, ignore this email."
     )
 
-    sendgrid_api_key = get_secret_value("SENDGRID_API_KEY")
-    sendgrid_from = get_secret_value("VERIFICATION_EMAIL_FROM")
+    sendgrid_api_key = get_first_secret_value(["SENDGRID_API_KEY", "SENDGRID_KEY"])
+    sendgrid_from = get_first_secret_value(["VERIFICATION_EMAIL_FROM", "SENDGRID_FROM_EMAIL", "EMAIL_FROM"])
     if sendgrid_api_key and sendgrid_from:
         payload = {
             "personalizations": [{"to": [{"email": destination}]}],
@@ -154,16 +162,16 @@ def send_code_email(destination: str, code: str, purpose: str, username: str) ->
             )
             if 200 <= response.status_code < 300:
                 return True, "Verification code sent by email."
-            return False, "Email delivery failed through SendGrid."
+                return False, "Email delivery failed through SendGrid API response."
         except Exception:
             return False, "Email delivery failed through SendGrid runtime error."
 
-    smtp_host = get_secret_value("SMTP_HOST")
-    smtp_port = int(get_secret_value("SMTP_PORT") or "587")
-    smtp_user = get_secret_value("SMTP_USERNAME")
-    smtp_password = get_secret_value("SMTP_PASSWORD")
-    smtp_from = get_secret_value("VERIFICATION_EMAIL_FROM")
-    smtp_ssl = get_secret_value("SMTP_USE_SSL").lower() == "true"
+            smtp_host = get_first_secret_value(["SMTP_HOST", "EMAIL_HOST"])
+            smtp_port = int(get_first_secret_value(["SMTP_PORT", "EMAIL_PORT"]) or "587")
+            smtp_user = get_first_secret_value(["SMTP_USERNAME", "SMTP_USER", "EMAIL_USERNAME", "EMAIL_USER"])
+            smtp_password = get_first_secret_value(["SMTP_PASSWORD", "EMAIL_PASSWORD"])
+            smtp_from = get_first_secret_value(["VERIFICATION_EMAIL_FROM", "SMTP_FROM", "EMAIL_FROM"])
+            smtp_ssl = get_first_secret_value(["SMTP_USE_SSL", "EMAIL_USE_SSL"]).lower() == "true"
 
     if smtp_host and smtp_user and smtp_password and smtp_from:
         msg = MIMEText(body)
@@ -185,16 +193,24 @@ def send_code_email(destination: str, code: str, purpose: str, username: str) ->
         except Exception:
             return False, "Email delivery failed through SMTP runtime error."
 
-    return False, "Email delivery is not configured."
+    return (
+        False,
+        "Email delivery not configured. Set one of: "
+        "(SENDGRID_API_KEY + VERIFICATION_EMAIL_FROM) or "
+        "(SMTP_HOST + SMTP_USERNAME + SMTP_PASSWORD + VERIFICATION_EMAIL_FROM).",
+    )
 
 
 def send_code_sms(destination: str, code: str, purpose: str, username: str) -> tuple[bool, str]:
-    sid = get_secret_value("TWILIO_ACCOUNT_SID")
-    token = get_secret_value("TWILIO_AUTH_TOKEN")
-    from_number = get_secret_value("TWILIO_FROM_NUMBER")
+    sid = get_first_secret_value(["TWILIO_ACCOUNT_SID", "TWILIO_SID"])
+    token = get_first_secret_value(["TWILIO_AUTH_TOKEN", "TWILIO_TOKEN"])
+    from_number = get_first_secret_value(["TWILIO_FROM_NUMBER", "TWILIO_FROM", "TWILIO_PHONE_NUMBER"])
 
     if not sid or not token or not from_number:
-        return False, "SMS delivery is not configured."
+        return (
+            False,
+            "SMS delivery not configured. Set: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER.",
+        )
 
     msg = f"{username}, your {purpose} verification code is {code}. It expires in 10 minutes."
     url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
@@ -207,7 +223,7 @@ def send_code_sms(destination: str, code: str, purpose: str, username: str) -> t
         )
         if 200 <= response.status_code < 300:
             return True, "Verification code sent by SMS."
-        return False, "SMS delivery failed through Twilio."
+        return False, "SMS delivery failed through Twilio API response."
     except Exception:
         return False, "SMS delivery failed through Twilio runtime error."
 
