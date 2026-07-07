@@ -52,10 +52,37 @@ def get_first_secret_value(names: list[str]) -> str:
 
 APP_VERSION = "2026.07.07"
 PLATFORM_FEE_RATE = 0.08
+AUTH_STORE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "auth_store.json")
 
 
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def load_auth_store() -> dict[str, Any]:
+    try:
+        if os.path.exists(AUTH_STORE_PATH):
+            with open(AUTH_STORE_PATH, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+                return payload if isinstance(payload, dict) else {}
+    except Exception:
+        pass
+    return {"accounts": {}, "account_profiles": {}, "user_roles": {}, "password_overrides": {}}
+
+
+def save_auth_store() -> None:
+    store = {
+        "accounts": st.session_state.accounts,
+        "account_profiles": st.session_state.account_profiles,
+        "user_roles": st.session_state.user_roles,
+        "password_overrides": st.session_state.password_overrides,
+    }
+    try:
+        os.makedirs(os.path.dirname(AUTH_STORE_PATH), exist_ok=True)
+        with open(AUTH_STORE_PATH, "w", encoding="utf-8") as handle:
+            json.dump(store, handle, indent=2, sort_keys=True)
+    except Exception:
+        pass
 
 
 def get_vision_runtime_config() -> dict[str, Any]:
@@ -492,6 +519,7 @@ def ensure_default_account(expected_username: str, expected_password: str) -> No
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
     ensure_account_programs(expected_username)
+    save_auth_store()
 
 
 def account_exists(username: str) -> bool:
@@ -519,6 +547,7 @@ def create_account(username: str, password: str, email: str, phone: str) -> None
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     ensure_account_programs(username)
+    save_auth_store()
 
 
 def save_remembered_credentials(client_id: str, username: str, password: str) -> None:
@@ -581,6 +610,7 @@ def check_for_available_update() -> dict[str, Any]:
 
 
 def init_state() -> None:
+    persisted = load_auth_store()
     defaults = {
         "authenticated": False,
         "current_user": "",
@@ -592,7 +622,7 @@ def init_state() -> None:
         "auth_page": "Login",
         "just_created_username": "",
         "just_created_password": "",
-        "accounts": {},
+        "accounts": persisted.get("accounts", {}),
         "pending_verifications": {},
         "remembered_credentials_by_client": {},
         "update_check_result": {
@@ -606,8 +636,9 @@ def init_state() -> None:
         "buyer_reviews_by_listing": {},
         "analyzed_listings": {},
         "last_listing_key": None,
-        "account_profiles": {},
-        "password_overrides": {},
+        "account_profiles": persisted.get("account_profiles", {}),
+        "password_overrides": persisted.get("password_overrides", {}),
+        "user_roles": persisted.get("user_roles", {}),
         "messages": [],
         "account_programs": {},
         "transactions": [],
@@ -627,6 +658,15 @@ def init_state() -> None:
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+    if persisted.get("accounts"):
+        st.session_state.accounts.update(persisted.get("accounts", {}))
+    if persisted.get("account_profiles"):
+        st.session_state.account_profiles.update(persisted.get("account_profiles", {}))
+    if persisted.get("password_overrides"):
+        st.session_state.password_overrides.update(persisted.get("password_overrides", {}))
+    if persisted.get("user_roles"):
+        st.session_state.user_roles.update(persisted.get("user_roles", {}))
 
 
 def get_default_listing_draft(location_hint: str = "") -> dict[str, Any]:
@@ -1230,6 +1270,7 @@ def render_profile_panel(logger: Any) -> None:
     if st.button("Apply role", key="apply_profile_role"):
         st.session_state.active_role = role_choice
         st.session_state.user_roles[st.session_state.current_user] = role_choice
+        save_auth_store()
         st.success(f"Role switched to {role_choice}.")
         st.rerun()
 
@@ -1360,6 +1401,7 @@ def render_profile_panel(logger: Any) -> None:
                 maybe_show_demo_code(str(rec["code"]))
                 st.warning(note)
 
+        save_auth_store()
         emit_audit_event(logger, "backup_contact_updated", {"user": st.session_state.current_user})
         st.success("Contact saved and a private verification code was sent.")
 
@@ -1427,6 +1469,7 @@ def render_profile_panel(logger: Any) -> None:
             st.error("New password and confirmation do not match.")
         else:
             st.session_state.accounts[st.session_state.current_user]["password_hash"] = hash_password(new_password.strip())
+            save_auth_store()
             emit_audit_event(logger, "password_changed", {"user": st.session_state.current_user})
             st.success("Password changed.")
 
