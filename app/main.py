@@ -43,6 +43,8 @@ def init_state() -> None:
     defaults = {
         "authenticated": False,
         "current_user": "",
+        "pending_login_user": "",
+        "needs_upload_resume_choice": False,
         "listing_field_errors": {},
         "buyer_reviews_by_listing": {},
         "analyzed_listings": {},
@@ -51,10 +53,61 @@ def init_state() -> None:
         "password_overrides": {},
         "messages": [],
         "detected_location": "",
+        "listing_drafts": {},
+        "active_listing_draft": {
+            "title": "",
+            "description": "",
+            "price": 699,
+            "location": "",
+            "photo_views": {},
+            "uploaded_photos": [],
+        },
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+def get_default_listing_draft(location_hint: str = "") -> dict[str, Any]:
+    return {
+        "title": "",
+        "description": "",
+        "price": 699,
+        "location": location_hint,
+        "photo_views": {},
+        "uploaded_photos": [],
+    }
+
+
+def load_user_listing_draft(username: str, location_hint: str = "") -> None:
+    stored = st.session_state.listing_drafts.get(username)
+    if stored:
+        st.session_state.active_listing_draft = {
+            "title": str(stored.get("title", "")),
+            "description": str(stored.get("description", "")),
+            "price": int(stored.get("price", 699)),
+            "location": str(stored.get("location", location_hint)),
+            "photo_views": dict(stored.get("photo_views", {})),
+            "uploaded_photos": list(stored.get("uploaded_photos", [])),
+        }
+    else:
+        st.session_state.active_listing_draft = get_default_listing_draft(location_hint)
+
+
+def save_listing_draft_for_user(username: str, draft: dict[str, Any]) -> None:
+    st.session_state.listing_drafts[username] = {
+        "title": str(draft.get("title", "")),
+        "description": str(draft.get("description", "")),
+        "price": int(draft.get("price", 699)),
+        "location": str(draft.get("location", "")),
+        "photo_views": dict(draft.get("photo_views", {})),
+        "uploaded_photos": list(draft.get("uploaded_photos", [])),
+    }
+
+
+def clear_listing_draft_for_user(username: str, location_hint: str = "") -> None:
+    st.session_state.listing_drafts[username] = get_default_listing_draft(location_hint)
+    st.session_state.active_listing_draft = get_default_listing_draft(location_hint)
 
 
 def analyze_uploaded_photo(uploaded_photo: Any, view_label: str) -> dict[str, Any]:
@@ -570,6 +623,8 @@ def render_account_security_panel(expected_username: str, expected_password: str
             st.sidebar.success("Password changed.")
 
     if st.sidebar.button("Log out", use_container_width=True):
+        if st.session_state.current_user:
+            save_listing_draft_for_user(st.session_state.current_user, st.session_state.active_listing_draft)
         st.session_state.authenticated = False
         st.session_state.current_user = ""
         st.rerun()
@@ -622,6 +677,9 @@ def main() -> None:
                 if authenticate_user(username, password, expected_username, effective_password):
                     st.session_state.authenticated = True
                     st.session_state.current_user = username
+                    st.session_state.pending_login_user = username
+                    st.session_state.needs_upload_resume_choice = True
+                    load_user_listing_draft(username)
                     emit_audit_event(logger, "login", {"status": "success", "user": username})
                     st.rerun()
                 emit_audit_event(logger, "login", {"status": "failed", "user": username})
@@ -743,6 +801,65 @@ def main() -> None:
 
     default_location = st.session_state.detected_location if st.session_state.detected_location else "Austin, TX"
 
+    if st.session_state.needs_upload_resume_choice and st.session_state.pending_login_user == st.session_state.current_user:
+        existing_draft = st.session_state.listing_drafts.get(st.session_state.current_user, get_default_listing_draft(default_location))
+        has_existing_content = bool(
+            str(existing_draft.get("title", "")).strip()
+            or str(existing_draft.get("description", "")).strip()
+            or str(existing_draft.get("location", "")).strip()
+            or int(existing_draft.get("price", 699)) != 699
+            or bool(existing_draft.get("uploaded_photos", []))
+        )
+
+        if has_existing_content:
+            st.info("You have an unfinished upload draft from a previous session.")
+            choice = st.radio(
+                "Upload draft option",
+                ["Resume where I left off", "Start again"],
+                horizontal=True,
+                key="resume_upload_choice",
+            )
+            if st.button("Apply draft choice", key="apply_upload_choice"):
+                if choice == "Start again":
+                    clear_listing_draft_for_user(st.session_state.current_user, default_location)
+                    emit_audit_event(
+                        logger,
+                        "draft_reset_on_login",
+                        {"user": st.session_state.current_user},
+                    )
+                else:
+                    load_user_listing_draft(st.session_state.current_user, default_location)
+                    emit_audit_event(
+                        logger,
+                        "draft_resumed_on_login",
+                        {"user": st.session_state.current_user},
+                    )
+                st.session_state.needs_upload_resume_choice = False
+                st.session_state.pending_login_user = ""
+                st.rerun()
+            st.stop()
+
+        st.session_state.needs_upload_resume_choice = False
+        st.session_state.pending_login_user = ""
+
+    active_draft = st.session_state.active_listing_draft
+    if not str(active_draft.get("location", "")).strip():
+        active_draft["location"] = default_location
+
+    st.markdown("### Upload draft")
+    col_draft_1, col_draft_2 = st.columns(2)
+    with col_draft_1:
+        if st.button("Save draft", use_container_width=True):
+            save_listing_draft_for_user(st.session_state.current_user, active_draft)
+            emit_audit_event(logger, "draft_saved", {"user": st.session_state.current_user})
+            st.success("Draft saved. You can resume it after logging in again.")
+    with col_draft_2:
+        if st.button("Start new draft", use_container_width=True):
+            clear_listing_draft_for_user(st.session_state.current_user, default_location)
+            emit_audit_event(logger, "draft_cleared", {"user": st.session_state.current_user})
+            st.success("Started a new draft.")
+            st.rerun()
+
     with st.form("listing_form"):
         uploaded_photos = st.file_uploader(
             "Listing photos (upload front, back, and sideways views)",
@@ -750,28 +867,53 @@ def main() -> None:
             accept_multiple_files=True,
         )
 
+        if uploaded_photos:
+            active_draft["uploaded_photos"] = [f.name for f in uploaded_photos]
+
         photo_views: list[str] = []
         for idx, uploaded_photo in enumerate(uploaded_photos or []):
             view_label = st.selectbox(
                 f"Photo view for {uploaded_photo.name}",
                 ["Front side", "Back side", "Sideways", "Other"],
+                index=["Front side", "Back side", "Sideways", "Other"].index(
+                    active_draft.get("photo_views", {}).get(uploaded_photo.name, "Other")
+                    if active_draft.get("photo_views", {}).get(uploaded_photo.name, "Other") in ["Front side", "Back side", "Sideways", "Other"]
+                    else "Other"
+                ),
                 key=f"photo_view_{idx}_{uploaded_photo.name}",
             )
             photo_views.append(view_label)
+            active_draft.setdefault("photo_views", {})[uploaded_photo.name] = view_label
 
-        title = st.text_input("Listing title", placeholder="Used iPhone 13 Pro Max")
+        title = st.text_input(
+            "Listing title",
+            value=str(active_draft.get("title", "")),
+            placeholder="Used iPhone 13 Pro Max",
+        )
+        active_draft["title"] = title
         if "title" in listing_field_errors:
             st.error(listing_field_errors["title"])
 
-        description = st.text_area("Description", placeholder="Describe the item clearly and include condition details.")
+        description = st.text_area(
+            "Description",
+            value=str(active_draft.get("description", "")),
+            placeholder="Describe the item clearly and include condition details.",
+        )
+        active_draft["description"] = description
         if "description" in listing_field_errors:
             st.error(listing_field_errors["description"])
 
-        price = st.number_input("Price", min_value=0, step=1, value=699)
+        price = st.number_input("Price", min_value=0, step=1, value=int(active_draft.get("price", 699)))
+        active_draft["price"] = int(price)
         if "price" in listing_field_errors:
             st.error(listing_field_errors["price"])
 
-        location = st.text_input("Location", value=default_location, placeholder="Austin, TX")
+        location = st.text_input(
+            "Location",
+            value=str(active_draft.get("location", default_location)),
+            placeholder="Austin, TX",
+        )
+        active_draft["location"] = location
         if "location" in listing_field_errors:
             st.error(listing_field_errors["location"])
 
@@ -815,6 +957,7 @@ def main() -> None:
                 photo_views=photo_views,
             )
             st.session_state.listing_field_errors = {}
+            clear_listing_draft_for_user(st.session_state.current_user, default_location)
         except ValueError as exc:
             emit_audit_event(logger, "validation_failed", {"client": client_id, "error": str(exc)})
             st.error(f"Input validation failed: {exc}")
