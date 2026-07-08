@@ -105,11 +105,11 @@ def load_json_from_github(path: str) -> dict[str, Any] | None:
     return None
 
 
-def save_json_to_github(path: str, payload: dict[str, Any]) -> None:
+def save_json_to_github(path: str, payload: dict[str, Any]) -> bool:
     token = get_state_github_token().strip()
     repo = get_state_repo().strip()
     if not token or not repo:
-        return
+        return False
 
     branch = get_state_branch().strip() or "main"
     normalized_path = path.lstrip("/")
@@ -140,9 +140,10 @@ def save_json_to_github(path: str, payload: dict[str, Any]) -> None:
         body["sha"] = sha
 
     try:
-        requests.put(api_url, headers=headers, json=body, timeout=15)
+        write_response = requests.put(api_url, headers=headers, json=body, timeout=15)
+        return write_response.status_code in (200, 201)
     except Exception:
-        pass
+        return False
 
 
 APP_VERSION = "2026.07.07"
@@ -231,9 +232,10 @@ def save_auth_store(username: str | None = None) -> None:
         with open(temp_path, "w", encoding="utf-8") as handle:
             json.dump(store, handle, indent=2, sort_keys=True)
         os.replace(temp_path, AUTH_STORE_PATH)
-        save_json_to_github("data/auth_store.json", store)
     except Exception:
         pass
+
+    save_json_to_github("data/auth_store.json", store)
 
 
 def save_marketplace_store(*sections: str) -> None:
@@ -272,9 +274,10 @@ def save_marketplace_store(*sections: str) -> None:
         with open(temp_path, "w", encoding="utf-8") as handle:
             json.dump(store, handle, indent=2, sort_keys=True)
         os.replace(temp_path, MARKETPLACE_STORE_PATH)
-        save_json_to_github("data/marketplace_store.json", store)
     except Exception:
         pass
+
+    save_json_to_github("data/marketplace_store.json", store)
 
 
 def reload_marketplace_store_into_session() -> None:
@@ -901,7 +904,7 @@ def init_state() -> None:
     defaults = {
         "authenticated": False,
         "current_user": "",
-        "active_panel": "profile",
+        "active_panel": "home",
         "active_role": "Lister",
         "user_roles": {},
         "pending_login_user": "",
@@ -1925,7 +1928,7 @@ def main() -> None:
                         st.session_state.pending_login_user = username.strip()
                         st.session_state.needs_upload_resume_choice = True
                         st.session_state.active_role = st.session_state.user_roles.get(username.strip(), "Lister")
-                        st.session_state.active_panel = "profile"
+                        st.session_state.active_panel = "home"
                         load_user_listing_draft(username.strip())
 
                         if remember_credentials:
@@ -2124,6 +2127,8 @@ def main() -> None:
 
     with st.sidebar:
         st.caption("Navigation")
+        if st.button("🏠", key="sidebar_home_icon", help="Home", use_container_width=True):
+            st.session_state.active_panel = "home"
         if st.button("👤", key="sidebar_profile_icon", help="Profile", use_container_width=True):
             st.session_state.active_panel = "profile"
         if st.button("💬", key="sidebar_messages_icon", help="Messages", use_container_width=True):
@@ -2135,8 +2140,10 @@ def main() -> None:
 
     if st.session_state.active_panel == "profile":
         render_profile_panel(logger=logger)
+        st.stop()
     elif st.session_state.active_panel == "messages":
         render_messages_panel(logger=logger, current_user=st.session_state.current_user)
+        st.stop()
 
     if st.session_state.current_user == st.session_state.get("admin_username", expected_username):
         render_update_assistant_panel(logger=logger)
